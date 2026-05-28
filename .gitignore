@@ -14,7 +14,8 @@ build/
 dist/
 *.egg-info/
 minilogue_xd_librarian_debug.spec
-minilogue_xd_librarian_codex_step1*.md
+minilogue_xd_librarian_codex*.md
+libraries/
 
 dumps/*.syx
 !dumps/.gitkeep

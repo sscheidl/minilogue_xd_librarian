@@ -1,6 +1,6 @@
 # minilogue xd Librarian
 
-Current build: v0.9.0-dev  
+Current milestone: v0.2.0-gui-rework  
 Target platform: Windows 11  
 Runtime: Python 3.10+  
 License: TBD
@@ -16,6 +16,9 @@ The app now provides a broad prototype workbench:
 - MIDI/SysEx receive diagnostics.
 - Manual MIDI IN and MIDI OUT selection.
 - Port-2 SysEx/Librarian port hints without forcing a choice.
+- Programs / Banks is the default workspace and shows all 500 slots.
+- Slot mapping follows `001..500` and `A001..E100`.
+- MIDI Clock and realtime messages are hidden by default to avoid log flooding.
 - Persistent settings for the last successful SysEx port pair.
 - Separate last MIDI and last SysEx summaries, so MIDI Clock does not overwrite SysEx diagnostics.
 - SysEx capture, inactivity finalization and `.syx` saving.
@@ -34,6 +37,15 @@ The app now provides a broad prototype workbench:
 - App log file under the user data folder.
 - Entry-point startup logging and Tkinter initialization error reporting.
 - Windows onedir PyInstaller build scripts.
+
+## Main Tabs
+
+- Programs / Banks
+- Transfer / SysEx
+- Backups
+- User OSC
+- User FX
+- Options
 
 ## Safety
 
@@ -92,15 +104,18 @@ The app marks likely Port-2 candidates as possible SysEx/Librarian ports, but al
 ## Manual Test Checklist
 
 1. Start the app.
-2. Select `MIDIIN2 (minilogue xd)` and `MIDIOUT2 (minilogue xd)` if present.
-3. Click `Open Ports`.
-4. Click `Listen for SysEx`.
-5. Trigger a Program Dump or All Dump on the minilogue xd.
-6. Confirm that RX flashes and the SysEx log shows hex data.
-7. Confirm that last SysEx still shows `F0`, `F7` and Korg `0x42` even if MIDI Clock arrives afterward.
-8. Save the capture as `.syx`.
-9. Load the saved `.syx`, export an analyzer report and verify message count/bytes.
-10. Create a backup and verify that `.syx`, `.json` and `.zip` are created under the app data backup folder.
+2. Confirm that `Programs / Banks` opens first and shows 500 slots.
+3. Check slot mapping: `001 / A001`, `100 / A100`, `101 / B001`, `500 / E100`.
+4. Open `Options`.
+5. Select `MIDIIN2 (minilogue xd)` and `MIDIOUT2 (minilogue xd)` if present.
+6. Click `Open Ports`.
+7. Click `Test selected ports` or `Listen for SysEx`.
+8. Trigger a Program Dump or All Dump on the minilogue xd.
+9. Confirm that MIDI Clock does not flood the Transfer / SysEx log.
+10. Confirm that last SysEx still shows `F0`, `F7` and Korg `0x42` even if MIDI Clock arrives afterward.
+11. Save the capture as `.syx`.
+12. Load the saved `.syx`, export an analyzer report and verify message count/bytes.
+13. Create a backup and verify that `.syx`, `.json` and `.zip` are created under the app data backup folder.
 
 ## Known Limitations
 
@@ -123,5 +138,5 @@ python -m compileall .
 ## Suggested Commit Message
 
 ```text
-v0.9.0-dev: Add broad librarian prototype with SysEx analysis, backups, banks and packaging
+v0.2.0: Rework GUI and filter MIDI clock
 ```

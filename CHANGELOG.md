@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.0-gui-rework - 2026-05-28
+
+### New Features
+
+- Reworked the GUI around a Librarian-first tab layout.
+- Made `Programs / Banks` the default first tab.
+- Added a 500-slot Programs / Banks table with `001..500` and `A001..E100` slot mapping.
+- Added minilogue-xd-specific slot mapping module and tests.
+- Added MIDI realtime filter module.
+- MIDI Clock is hidden from the log by default and counted separately.
+- Added Options tab controls for MIDI ports, communication test, filters, transfer settings and paths.
+- Split User OSC and User FX into separate tabs with placeholder management UI.
+
+### Compatibility Notes
+
+- Port-2 SysEx/Librarian candidates are still marked but never forced.
+- Clock/realtime messages no longer overwrite the last SysEx summary.
+- Hardware behavior must still be verified on the actual minilogue xd after this GUI rework.
+
 ## v0.9.0-dev - 2026-05-28
 
 ### New Features
