@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 import sys
 import tkinter as tk
 
@@ -12,18 +14,45 @@ from app.main_window import MainWindow
 
 WINDOW_TITLE = "minilogue xd Librarian - MIDI Test"
 MIN_WINDOW_SIZE = (980, 680)
+DEFAULT_LOG_LEVEL = logging.INFO
 
 
 def configure_logging() -> None:
     """Initialize console and file logging before the GUI starts."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
+    level = logging.DEBUG if os.getenv("DEBUG") else _configured_log_level()
+    try:
+        handlers: list[logging.Handler] = [
             logging.StreamHandler(),
             logging.FileHandler(log_path(), encoding="utf-8"),
-        ],
+        ]
+    except OSError as exc:
+        print(f"[WARNING] Log file could not be created: {exc}", file=sys.stderr)
+        handlers = [logging.StreamHandler()]
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
     )
+
+
+def _configured_log_level() -> int:
+    configured = os.getenv("MINILOGUE_XD_LOG_LEVEL", "").strip().upper()
+    if not configured:
+        return DEFAULT_LOG_LEVEL
+    return getattr(logging, configured, DEFAULT_LOG_LEVEL)
+
+
+def configure_root(root: tk.Tk) -> None:
+    """Apply root window settings that belong to the app shell."""
+    root.title(WINDOW_TITLE)
+    root.minsize(*MIN_WINDOW_SIZE)
+    icon_path = Path(__file__).resolve().parent / "assets" / "icon.ico"
+    if icon_path.exists():
+        try:
+            root.iconbitmap(str(icon_path))
+        except tk.TclError:
+            pass
 
 
 def main() -> None:
@@ -34,8 +63,7 @@ def main() -> None:
     try:
         root = tk.Tk()
         root.withdraw()
-        root.title(WINDOW_TITLE)
-        root.minsize(*MIN_WINDOW_SIZE)
+        configure_root(root)
 
         app = MainWindow(root)
         root.protocol("WM_DELETE_WINDOW", app.on_close)
