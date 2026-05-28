@@ -57,6 +57,8 @@ from xd_formats import (
     write_sysex_programs,
 )
 
+_APP_VERSION = "0.3.1"
+
 
 class MainWindow:
     """Tabbed librarian GUI with safe raw SysEx workflows."""
@@ -903,6 +905,7 @@ class MainWindow:
         sender = self.receiver.make_sender()
         self.current_sender = sender
         delay_ms = self.read_int(self.send_delay_var.get(), 80)
+        sent = 0
         try:
             sent = sender.send_messages(
                 [record.raw for record in records],
@@ -917,10 +920,10 @@ class MainWindow:
             self.append_log(log_line(f"Send failed: {exc}"))
             messagebox.showerror("Send failed", str(exc))
             self.flash_rx("error")
-            return
+        else:
+            self.append_log(log_line(f"Send complete: {sent}/{len(records)} message(s)."))
         finally:
             self.current_sender = None
-        self.append_log(log_line(f"Send complete: {sent}/{len(records)} message(s)."))
 
     def cancel_send(self) -> None:
         if self.current_sender is not None:
@@ -1564,7 +1567,7 @@ class MainWindow:
         return "\n".join(
             [
                 "minilogue xd Librarian Diagnostic Report",
-                f"Version: unknown",
+                f"Version: {_APP_VERSION}",
                 f"OS: {platform.platform()}",
                 f"Python: {platform.python_version()}",
                 f"Executable: {sys.executable}",
@@ -1749,10 +1752,17 @@ class MainWindow:
 
     def on_close(self) -> None:
         """Close MIDI resources, persist settings and destroy the root window."""
+        unsaved_items = []
         if self.dirty:
+            unsaved_items.append("the current bank has unsaved changes")
+        if self.sysex_buffer.to_bytes():
+            unsaved_items.append("there is an unsaved SysEx capture")
+        if unsaved_items:
             if not messagebox.askyesno(
                 "Unsaved changes",
-                "The current bank has unsaved changes. Close anyway?",
+                "Unsaved data is present:\n\n"
+                + "\n".join(f"- {item}" for item in unsaved_items)
+                + "\n\nClose anyway?",
             ):
                 return
         self._collect_settings()
