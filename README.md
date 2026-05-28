@@ -1,8 +1,8 @@
 # minilogue xd Librarian
 
-Current milestone: v0.3.0-format-layer  
-Target platform: Windows 11  
-Runtime: Python 3.10+  
+Current milestone: v0.4.0-consolidated-workflow
+Target platform: Windows 11
+Runtime: Python 3.10+
 License: TBD
 
 This is a librarian, backup, transfer and diagnostic tool for the Korg minilogue xd.
@@ -11,51 +11,31 @@ It is not a sound editor. It does not edit oscillator, filter, envelope, LFO, se
 
 ## Current Scope
 
-The app now provides a broad prototype workbench:
-
-- MIDI/SysEx receive diagnostics.
-- Manual MIDI IN and MIDI OUT selection.
-- Port-2 SysEx/Librarian port hints without forcing a choice.
-- Programs / Banks is the default workspace and shows all 500 slots.
-- Slot mapping follows `001..500` and `A001..E100`.
-- MIDI Clock and realtime messages are hidden by default to avoid log flooding.
-- Persistent settings for the last successful SysEx port pair.
-- Separate last MIDI and last SysEx summaries, so MIDI Clock does not overwrite SysEx diagnostics.
-- SysEx capture, inactivity finalization and `.syx` saving.
-- Verified `.mnlgxdprog`, `.mnlgxdlib` and clean `.syx` program-dump import.
-- `.mnlgxdlib` and `.syx` export from decoded bank data.
-- `.mnlgxdunit` manifest and payload import/export helpers.
-- Canonical 1024-byte program model with validated `PROG` signature.
-- Program-name decoding and writing at bytes `4:16`.
-- SysEx splitting, hashing and heuristic dump classification.
-- Analyzer report export as `.txt` and `.json`.
-- Explicit raw SysEx send for complete `F0...F7` messages only, with confirmation and delay.
-- Preset workspace for loading, filtering, duplicating, deleting, exporting and sending raw messages.
-- 500-slot offline bank workspace.
-- Offline bank operations: rename program, copy, paste, move, swap, clear, sort and undo.
-- Double-click rename in the program-name column.
-- Bank slot reordering by drag inside the table.
-- Duplicate detection by hash.
-- Backup creation with `.syx`, JSON manifest and ZIP bundle.
-- Backup loading, sending and basic comparison.
-- User OSC / User FX local file inventory with import, remove and manifest export.
-- CLI helpers under `tools/` for inspection, SysEx export and library splitting.
-- App log file under the user data folder.
-- Entry-point startup logging and Tkinter initialization error reporting.
-- Windows onedir PyInstaller build scripts.
+- Korg-native formats are the normal workflow: `.mnlgxdlib`, `.mnlgxdprog`, `.mnlgxdunit`.
+- Raw `.syx` is secondary and lives in `Transfer / SysEx` for diagnostics, capture and special transfer workflows.
+- `Programs / Banks` is the default workspace and shows all 500 linear slots as `001..500`.
+- Bank-label mapping `A001..E100` is still available internally and in tests, but is not a default table column.
+- `.mnlgxdprog`, `.mnlgxdlib` and clean `.syx` program-dump import are validated before active import.
+- `.mnlgxdlib` and `.syx` export from decoded bank data are available.
+- Single program export prefers `.mnlgxdprog` and uses a sanitized patch name.
+- MIDI Clock and realtime messages are hidden by default and do not count as relevant MIDI events.
+- Request builders exist for current program and individual slots; full-bank receive currently sends iterative slot requests and needs hardware verification.
+- User OSC and User FX tabs use slot-oriented local inventory tables; transfer to the device is intentionally disabled until verified.
+- Backups are workflow actions, not a separate tab.
 
 ## Main Tabs
 
 - Programs / Banks
 - Transfer / SysEx
-- Backups
 - User OSC
 - User FX
 - Options
 
 ## Safety
 
-No automatic writes are performed. Sending is available only as an explicit action after user confirmation. Unknown raw files that are not complete SysEx messages are loadable for inspection but are blocked from sending.
+No automatic writes are performed. Sending is available only as an explicit action after user confirmation. Unknown or incompatible imports are blocked from the active workspace, while raw SysEx diagnostics remain available in the transfer tab.
+
+Before writing a whole bank to the device, the app recommends creating a backup first. Hardware write workflows still need careful real-device testing.
 
 ## Install From Source
 
@@ -74,15 +54,8 @@ python main.py
 
 ## Build Windows EXE
 
-Debug build with console:
-
 ```powershell
 .\build_windows_debug.bat
-```
-
-GUI build without console:
-
-```powershell
 .\build_windows.bat
 ```
 
@@ -94,8 +67,6 @@ dist/
   minilogue_xd_librarian_debug/
 ```
 
-The onedir build is preferred while MIDI backend behavior is still being tested.
-
 ## Hardware Port Note
 
 On the first Windows hardware test, SysEx worked through the second minilogue xd endpoint pair:
@@ -105,34 +76,31 @@ MIDI IN:  MIDIIN2 (minilogue xd) 1
 MIDI OUT: MIDIOUT2 (minilogue xd) 2
 ```
 
-The app marks likely Port-2 candidates as possible SysEx/Librarian ports, but all ports remain selectable.
+The app marks likely Port-2 candidates as possible SysEx/Librarian ports, but all ports remain selectable. The true port is the one that answers requests.
 
 ## Manual Test Checklist
 
-1. Start the app.
-2. Confirm that `Programs / Banks` opens first and shows 500 slots.
-3. Check slot mapping: `001 / A001`, `100 / A100`, `101 / B001`, `500 / E100`.
-4. Open `Options`.
-5. Select `MIDIIN2 (minilogue xd)` and `MIDIOUT2 (minilogue xd)` if present.
-6. Click `Open Ports`.
-7. Click `Test selected ports` or `Listen for SysEx`.
-8. Trigger a Program Dump or All Dump on the minilogue xd.
-9. Open `All Presets.mnlgxdlib` or a clean program-dump `.syx` and confirm decoded program names appear.
-10. Double-click a program name, rename it and confirm the new name remains after export/import.
-11. Drag a bank row onto another row and confirm the program moves to the target slot.
-12. Confirm that MIDI Clock does not flood the Transfer / SysEx log.
-13. Confirm that last SysEx still shows `F0`, `F7` and Korg `0x42` even if MIDI Clock arrives afterward.
-14. Save the capture as `.syx`.
-15. Load the saved `.syx`, export an analyzer report and verify message count/bytes.
-16. Create a backup and verify that `.syx`, `.json` and `.zip` are created under the app data backup folder.
+1. Start the app without the XD connected and confirm it does not crash.
+2. Confirm tabs are `Programs / Banks`, `Transfer / SysEx`, `User OSC`, `User FX`, `Options`.
+3. Open a `.mnlgxdlib` and confirm 500 slots and decoded names.
+4. Type into Search and confirm live filtering plus `n / 500 shown`.
+5. Click table headers and confirm view-only sorting.
+6. Right-click a bank row and confirm context menu entries are enabled/disabled sensibly.
+7. Rename a decoded program and round-trip export/import.
+8. Use `Transfer / SysEx` for Raw Capture and `.syx` analysis.
+9. Confirm MIDI Clock does not flood the log and does not dominate the main status.
+10. With Port 2 selected, test `Request Current` and `Request Slot`.
+11. Treat `Request Full Bank` as hardware-verification workflow.
+12. Import a `.mnlgxdunit` and confirm type, compatibility and status are visible.
 
 ## Known Limitations
 
-- Bank import from unknown files is raw/experimental and preserves bytes.
-- AddInfo `.syx` files are diagnostic/metadata dumps and are not imported as sendable programs.
-- User OSC and User FX transfer is not implemented yet; local file inventory only.
+- No sound-parameter editor.
+- `.mnlgxdpreset` preset-pack import is not implemented yet.
+- Full-bank request/receive needs real minilogue xd verification.
+- User OSC / User FX sending to the device is intentionally disabled.
 - Microtuning management is not implemented yet.
-- Hardware send workflows need careful real-device testing before daily use.
+- Unknown raw data is preserved only for diagnostics, not active sending.
 
 ## Tests
 
@@ -144,5 +112,5 @@ python -m compileall app devices midi models librarian tests utils xd_formats to
 ## Suggested Commit Message
 
 ```text
-v0.3.0: Add verified minilogue xd format layer
+v0.4.0: Consolidate librarian workflow, GUI cleanup and format validation
 ```

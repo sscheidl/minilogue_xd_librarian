@@ -35,7 +35,8 @@ from librarian.sysex_tools import (
     split_sysex_stream,
     write_report_files,
 )
-from librarian.user_units import export_manifest, import_user_unit, scan_user_units
+from librarian.import_validation import COMPATIBLE, PROBABLY_COMPATIBLE, validate_import_path
+from librarian.user_units import import_user_unit, scan_user_units
 from midi.diagnostics import MidiMessageInfo, analyze_raw_message
 from midi.filters import (
     MidiFilterSettings,
@@ -44,9 +45,11 @@ from midi.filters import (
 )
 from midi.ports import get_input_ports, get_output_ports
 from midi.receiver import MidiReceiver, QueuedMidiError, QueuedMidiMessage
+from midi.sysex_requests import request_current_program, request_program_slot
 from midi.sysex_buffer import SysexBuffer
 from utils.hexview import format_hex
 from utils.logger import append_to_file, log_line
+from xd_formats.filename_utils import safe_filename
 from xd_formats import (
     XDLibrary,
     encode_program_dump,
@@ -54,10 +57,28 @@ from xd_formats import (
     load_mnlgxdlib,
     load_mnlgxdprog,
     save_mnlgxdlib,
+    save_mnlgxdprog,
     write_sysex_programs,
 )
 
-_APP_VERSION = "0.3.1"
+_APP_VERSION = "0.4.0"
+_BANK_COLUMNS = ("slot", "name", "source", "status", "hash", "notes")
+_BANK_COLUMN_TITLES = {
+    "slot": "Slot",
+    "name": "Program Name",
+    "source": "Source",
+    "status": "Status",
+    "hash": "Hash",
+    "notes": "Notes",
+}
+_BANK_COLUMN_WIDTHS = {
+    "slot": 80,
+    "name": 190,
+    "source": 240,
+    "status": 180,
+    "hash": 110,
+    "notes": 360,
+}
 
 
 class MainWindow:
@@ -102,6 +123,8 @@ class MainWindow:
         self.change_log: list[str] = []
         self.last_error = ""
         self.logger = logging.getLogger(__name__)
+        self.bank_sort_column: str | None = None
+        self.bank_sort_reverse = False
 
         self.input_port_var = tk.StringVar()
         self.output_port_var = tk.StringVar()
@@ -123,12 +146,11 @@ class MainWindow:
         self.settings_status_var = tk.StringVar()
         self.bottom_status_var = tk.StringVar()
         self.analyzer_status_var = tk.StringVar(value="No SysEx file loaded.")
-        self.backup_status_var = tk.StringVar(value="No backup selected.")
+        self.bank_count_var = tk.StringVar(value="500 / 500 shown")
 
         self._build_layout()
         self.refresh_ports()
         self.refresh_bank_tree()
-        self.refresh_backup_list()
         self.refresh_user_units_trees()
         self.update_status()
 
@@ -139,26 +161,25 @@ class MainWindow:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
+        self._build_menu()
+        self._configure_notebook_style()
         self.tabs = ttk.Notebook(self.root)
         self.tabs.grid(row=0, column=0, sticky="nsew")
 
         self.banks_tab = ttk.Frame(self.tabs, padding=10)
         self.midi_tab = ttk.Frame(self.tabs, padding=10)
-        self.backups_tab = ttk.Frame(self.tabs, padding=10)
         self.user_osc_tab = ttk.Frame(self.tabs, padding=10)
         self.user_fx_tab = ttk.Frame(self.tabs, padding=10)
         self.settings_tab = ttk.Frame(self.tabs, padding=10)
 
         self.tabs.add(self.banks_tab, text="Programs / Banks")
         self.tabs.add(self.midi_tab, text="Transfer / SysEx")
-        self.tabs.add(self.backups_tab, text="Backups")
         self.tabs.add(self.user_osc_tab, text="User OSC")
         self.tabs.add(self.user_fx_tab, text="User FX")
         self.tabs.add(self.settings_tab, text="Options")
 
         self._build_banks_tab()
         self._build_midi_tab()
-        self._build_backups_tab()
         self._build_user_unit_placeholder_tab(self.user_osc_tab, "User OSC")
         self._build_user_unit_placeholder_tab(self.user_fx_tab, "User FX")
         self._build_settings_tab()
@@ -169,6 +190,29 @@ class MainWindow:
             relief=tk.SUNKEN,
             padding=(6, 3),
         ).grid(row=1, column=0, sticky="ew")
+
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="Open Bank...", command=self.open_bank)
+        file_menu.add_command(label="Open Preset...", command=self.open_preset_into_bank)
+        file_menu.add_command(label="Save Bank / Export As...", command=self.save_bank_copy)
+        file_menu.add_separator()
+        file_menu.add_command(label="Create Full Backup...", command=self.save_capture_backup)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_close)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        self.root.configure(menu=menu_bar)
+
+    @staticmethod
+    def _configure_notebook_style() -> None:
+        style = ttk.Style()
+        style.configure("TNotebook.Tab", padding=(12, 6), background="#d6d8db")
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", "#f7f7f7"), ("!selected", "#d6d8db")],
+            foreground=[("selected", "#111111"), ("!selected", "#404040")],
+        )
 
     def _build_midi_tab(self) -> None:
         self.midi_tab.columnconfigure(0, weight=1)
@@ -196,8 +240,9 @@ class MainWindow:
         button_specs = [
             ("Refresh Ports", self.refresh_ports),
             ("Open Ports", self.open_ports),
-            ("Receive Single", lambda: self.start_receive_mode("single")),
-            ("Receive Bank", lambda: self.start_receive_mode("bank")),
+            ("Request Current", self.request_current_from_xd),
+            ("Request Slot", self.request_selected_slot_from_xd),
+            ("Request Full Bank", self.request_full_bank_from_xd),
             ("Raw Capture", lambda: self.start_receive_mode("raw")),
             ("Close Ports", self.close_ports),
             ("Clear Log", self.clear_log),
@@ -327,101 +372,46 @@ class MainWindow:
 
         controls = ttk.Frame(self.banks_tab)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        bank_buttons = [
-            ("Open Bank", self.open_bank),
-            ("Open Preset", self.open_preset_into_bank),
-            ("Save Bank / Export As", self.save_bank_copy),
-            ("Export Selected", self.export_selected_bank_slots),
-            ("Receive from XD", self.listen_for_sysex),
-            ("Send Selected", self.send_selected_bank_slots),
-            ("Rename", self.rename_bank_slot),
-            ("Duplicate", self.duplicate_bank_slot),
-            ("Delete from Workspace", self.clear_bank_slot),
-            ("Copy", self.copy_bank_slot),
-            ("Paste", self.paste_bank_slot),
-            ("Move To", self.move_bank_slot),
-            ("Swap", self.swap_bank_slots),
-            ("Clear / Init", self.clear_bank_slot),
-            ("Sort A-Z", lambda: self.sort_bank(False)),
-            ("Sort Z-A", lambda: self.sort_bank(True)),
-            ("Undo", self.undo_bank),
-            ("Change Log", self.show_change_log),
+        group_specs = [
+            ("File", [("Open Bank", self.open_bank), ("Open Preset", self.open_preset_into_bank), ("Save Bank", self.save_bank_copy), ("Save Bank As", self.save_bank_copy)]),
+            ("Receive", [("Request Current", self.request_current_from_xd), ("Request Slot", self.request_selected_slot_from_xd), ("Request Full Bank", self.request_full_bank_from_xd)]),
+            ("Send", [("Send Selected", self.send_selected_bank_slots), ("Send to Buffer", self.send_selected_to_buffer), ("Write Bank to XD", self.write_bank_to_xd)]),
+            ("Edit", [("Cut", self.cut_bank_slot), ("Copy", self.copy_bank_slot), ("Paste", self.paste_bank_slot), ("Move To", self.move_bank_slot), ("Rename", self.rename_bank_slot), ("Duplicate", self.duplicate_bank_slot), ("Delete", self.clear_bank_slot), ("Clear / Init", self.clear_bank_slot), ("Undo", self.undo_bank), ("Change Log", self.show_change_log)]),
         ]
-        for index, (text, command) in enumerate(bank_buttons):
-            ttk.Button(controls, text=text, command=command).grid(row=index // 8, column=index % 8, padx=(0, 5), pady=(0, 4))
+        for column, (title, buttons) in enumerate(group_specs):
+            group = ttk.LabelFrame(controls, text=title)
+            group.grid(row=0, column=column, sticky="nw", padx=(0, 8), pady=(0, 4))
+            for index, (text, command) in enumerate(buttons):
+                ttk.Button(group, text=text, command=command).grid(row=index // 4, column=index % 4, padx=3, pady=3)
+
         self.bank_search_var = tk.StringVar()
-        self.show_duplicates_var = tk.BooleanVar(value=False)
-        ttk.Label(controls, text="Search").grid(row=2, column=0, sticky="w")
-        ttk.Entry(controls, textvariable=self.bank_search_var, width=24).grid(row=2, column=1, sticky="w")
-        ttk.Checkbutton(controls, text="Duplicates", variable=self.show_duplicates_var).grid(
-            row=2, column=2, sticky="w"
-        )
-        ttk.Button(controls, text="Find / Filter", command=self.refresh_bank_tree).grid(row=2, column=3, sticky="w")
+        self.bank_search_var.trace_add("write", lambda *_: self.refresh_bank_tree())
+        search_group = ttk.LabelFrame(controls, text="Search")
+        search_group.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        search_group.columnconfigure(1, weight=1)
+        ttk.Label(search_group, text="Search").grid(row=0, column=0, sticky="w", padx=(8, 5), pady=5)
+        ttk.Entry(search_group, textvariable=self.bank_search_var, width=34).grid(row=0, column=1, sticky="ew", pady=5)
+        ttk.Button(search_group, text="Clear", command=self.clear_bank_search).grid(row=0, column=2, sticky="w", padx=5, pady=5)
+        ttk.Label(search_group, textvariable=self.bank_count_var, foreground="#5f6368").grid(row=0, column=3, sticky="e", padx=8, pady=5)
         ttk.Label(
             controls,
             text="No bank loaded. Open a bank, load presets, or receive data from the minilogue xd.",
             foreground="#5f6368",
-        ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(5, 0))
+        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(5, 0))
 
         self.bank_tree = ttk.Treeview(
             self.banks_tab,
-            columns=("linear", "bank_slot", "name", "source", "status", "hash", "notes"),
+            columns=_BANK_COLUMNS,
             show="headings",
             selectmode="extended",
         )
-        self._setup_tree(
-            self.bank_tree,
-            [
-                ("linear", "Linear Slot", 80),
-                ("bank_slot", "Bank Slot", 80),
-                ("name", "Program Name", 170),
-                ("source", "Source", 230),
-                ("status", "Status", 180),
-                ("hash", "Hash", 110),
-                ("notes", "Notes", 300),
-            ],
-        )
+        self._setup_bank_tree()
         self.bank_tree.grid(row=1, column=0, sticky="nsew")
         self.bank_tree.bind("<ButtonPress-1>", self.on_bank_drag_start)
         self.bank_tree.bind("<ButtonRelease-1>", self.on_bank_drag_release)
         self.bank_tree.bind("<Double-1>", self.on_bank_double_click)
-
-    def _build_backups_tab(self) -> None:
-        self.backups_tab.columnconfigure(0, weight=1)
-        self.backups_tab.rowconfigure(2, weight=1)
-
-        controls = ttk.Frame(self.backups_tab)
-        controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        for index, (text, command) in enumerate(
-            [
-                ("Save Capture Backup", self.save_capture_backup),
-                ("Refresh", self.refresh_backup_list),
-                ("Load Selected", self.load_selected_backup),
-                ("Send Selected", self.send_selected_backup),
-                ("Compare Two", self.compare_backups),
-            ]
-        ):
-            ttk.Button(controls, text=text, command=command).grid(row=0, column=index, padx=(0, 6))
-        ttk.Label(self.backups_tab, textvariable=self.backup_status_var).grid(
-            row=1, column=0, sticky="ew", pady=(0, 8)
-        )
-        self.backup_tree = ttk.Treeview(
-            self.backups_tab,
-            columns=("name", "messages", "bytes", "created", "notes"),
-            show="headings",
-            selectmode="extended",
-        )
-        self._setup_tree(
-            self.backup_tree,
-            [
-                ("name", "Name", 260),
-                ("messages", "Messages", 90),
-                ("bytes", "Bytes", 100),
-                ("created", "Created", 150),
-                ("notes", "Notes", 360),
-            ],
-        )
-        self.backup_tree.grid(row=2, column=0, sticky="nsew")
+        self.bank_tree.bind("<Button-3>", self.show_bank_context_menu)
+        self.bank_context_menu = self._build_bank_context_menu()
 
     def _build_user_unit_placeholder_tab(self, parent: ttk.Frame, label: str) -> None:
         parent.columnconfigure(0, weight=1)
@@ -429,37 +419,40 @@ class MainWindow:
 
         controls = ttk.Frame(parent)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        for index, (text, command) in enumerate(
-            [
-                ("Import Files", self.import_user_units),
-                ("Remove From Library", self.remove_selected_user_units),
-                ("Export Manifest", self.export_user_units_manifest),
-                ("View Manifest", self.view_selected_user_unit_manifest),
-                ("Refresh", self.refresh_user_units_trees),
-                ("Send", self.user_unit_send_not_implemented),
-            ]
-        ):
-            ttk.Button(controls, text=text, command=command).grid(row=0, column=index, padx=(0, 6))
+        button_specs = [
+            ("Read from XD", self.user_unit_send_not_implemented, tk.DISABLED),
+            ("Load Unit", self.import_user_units, tk.NORMAL),
+            ("Save Unit", self.user_unit_send_not_implemented, tk.DISABLED),
+            ("Rename", self.user_unit_send_not_implemented, tk.DISABLED),
+            ("Move To", self.user_unit_send_not_implemented, tk.DISABLED),
+            ("Delete / Clear", self.remove_selected_user_units, tk.NORMAL),
+            ("Send to XD", self.user_unit_send_not_implemented, tk.DISABLED),
+            ("Refresh", self.refresh_user_units_trees, tk.NORMAL),
+        ]
+        for index, (text, command, state) in enumerate(button_specs):
+            ttk.Button(controls, text=text, command=command, state=state).grid(row=0, column=index, padx=(0, 6))
         ttk.Label(
             controls,
-            text=f"{label} transfer is not implemented yet. Files are kept separate from programs and banks.",
+            text=f"{label} slots are local inventory only until hardware transfer is verified.",
             foreground="#5f6368",
-        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(6, 0))
 
         tree = ttk.Treeview(
             parent,
-            columns=("file", "kind", "size", "hash", "modified"),
+            columns=("slot", "name", "type", "compatibility", "status", "source", "notes"),
             show="headings",
             selectmode="extended",
         )
         self._setup_tree(
             tree,
             [
-                ("file", "File", 320),
-                ("kind", "Kind", 110),
-                ("size", "Bytes", 90),
-                ("hash", "Hash", 120),
-                ("modified", "Modified", 160),
+                ("slot", "Slot", 70),
+                ("name", "Name", 170),
+                ("type", "Type", 110),
+                ("compatibility", "Compatibility", 170),
+                ("status", "Status", 150),
+                ("source", "Source", 260),
+                ("notes", "Notes", 260),
             ],
         )
         tree.grid(row=1, column=0, sticky="nsew")
@@ -490,8 +483,6 @@ class MainWindow:
                 ("Refresh Ports", self.refresh_ports),
                 ("Open Ports", self.open_ports),
                 ("Close Ports", self.close_ports),
-                ("MIDI Connection Test", self.midi_connection_test),
-                ("Receive Raw SysEx", lambda: self.start_receive_mode("raw")),
                 ("Save Port Combination", self.save_current_port_combination),
                 ("Open Log Folder", self.open_log_folder),
                 ("Copy Diagnostic Report", self.copy_diagnostic_report),
@@ -568,6 +559,76 @@ class MainWindow:
         for column, text, width in columns:
             tree.heading(column, text=text)
             tree.column(column, width=width, anchor=tk.W)
+
+    def _setup_bank_tree(self) -> None:
+        for column in _BANK_COLUMNS:
+            self.bank_tree.column(column, width=_BANK_COLUMN_WIDTHS[column], anchor=tk.W)
+        self.update_bank_headings()
+
+    def update_bank_headings(self) -> None:
+        for column in _BANK_COLUMNS:
+            title = _BANK_COLUMN_TITLES[column]
+            if self.bank_sort_column == column:
+                title += " " + ("v" if self.bank_sort_reverse else "^")
+            self.bank_tree.heading(column, text=title, command=lambda col=column: self.set_bank_sort(col))
+
+    def set_bank_sort(self, column: str) -> None:
+        if self.bank_sort_column == column:
+            self.bank_sort_reverse = not self.bank_sort_reverse
+        else:
+            self.bank_sort_column = column
+            self.bank_sort_reverse = False
+        self.update_bank_headings()
+        self.refresh_bank_tree()
+
+    def _build_bank_context_menu(self) -> tk.Menu:
+        menu = tk.Menu(self.root, tearoff=False)
+        self.bank_context_rules: list[str] = []
+        entries = [
+            ("Cut", self.cut_bank_slot, "selection"),
+            ("Copy", self.copy_bank_slot, "selection"),
+            ("Paste", self.paste_bank_slot, "clipboard"),
+            ("Move To...", self.move_bank_slot, "single"),
+            ("Rename", self.rename_bank_slot, "single"),
+            ("Duplicate", self.duplicate_bank_slot, "single"),
+            ("Delete", self.clear_bank_slot, "selection"),
+            ("Clear / Init", self.clear_bank_slot, "selection"),
+            ("Create Init Program", self.create_init_program_slot, "disabled"),
+            ("Save as minilogue xd Program...", self.save_selected_as_mnlgxdprog, "data"),
+            ("Save as SysEx...", self.save_selected_as_sysex, "data"),
+            ("Send selected to XD buffer", self.send_selected_to_buffer, "data"),
+            ("Send selected to XD slot", self.send_selected_bank_slots, "data"),
+            ("Request this slot from XD", self.request_selected_slot_from_xd, "single"),
+        ]
+        for label, command, rule in entries:
+            menu.add_command(label=label, command=command)
+            menu.entryconfig(label, state=tk.DISABLED if rule == "disabled" else tk.NORMAL)
+            self.bank_context_rules.append(rule)
+        return menu
+
+    def show_bank_context_menu(self, event: tk.Event) -> None:
+        item = self.bank_tree.identify_row(event.y)
+        if item and item.isdigit() and item not in self.bank_tree.selection():
+            self.bank_tree.selection_set(item)
+        self.update_bank_context_menu()
+        self.bank_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def update_bank_context_menu(self) -> None:
+        selection = self.selected_bank_indices()
+        has_selection = bool(selection)
+        has_single = len(selection) == 1
+        has_data = any(self.bank.slots[index].raw or self.bank.slots[index].prog_bin for index in selection)
+        has_clipboard = self.bank.clipboard is not None
+        for index, rule in enumerate(self.bank_context_rules):
+            enabled = (
+                (rule == "selection" and has_selection)
+                or (rule == "single" and has_single)
+                or (rule == "data" and has_data)
+                or (rule == "clipboard" and has_clipboard and has_single)
+            )
+            if rule == "disabled":
+                enabled = False
+            self.bank_context_menu.entryconfig(index, state=tk.NORMAL if enabled else tk.DISABLED)
 
     def refresh_ports(self) -> None:
         try:
@@ -719,7 +780,6 @@ class MainWindow:
         now = time.time()
         info = analyze_raw_message(item.raw, item.message_type)
         self.last_midi_info = info
-        self.total_messages += 1
         is_realtime = is_realtime_message(info.message_type)
         if is_realtime:
             self.realtime_messages += 1
@@ -727,6 +787,8 @@ class MainWindow:
                 self.clock_messages += 1
                 if self.listen_active:
                     self.listen_saw_clock = True
+        else:
+            self.total_messages += 1
         if self.listen_active:
             self.listen_saw_midi = True
 
@@ -938,6 +1000,10 @@ class MainWindow:
         if not path:
             return
         source_path = Path(path)
+        validation = validate_import_path(source_path)
+        if validation.status not in {COMPATIBLE, PROBABLY_COMPATIBLE}:
+            messagebox.showwarning("Import blocked", f"{validation.status}: {validation.message}")
+            return
         if source_path.suffix.lower() == ".mnlgxdprog":
             try:
                 program = load_mnlgxdprog(source_path)
@@ -965,6 +1031,10 @@ class MainWindow:
         if not path:
             return
         source_path = Path(path)
+        validation = validate_import_path(source_path)
+        if validation.status not in {COMPATIBLE, PROBABLY_COMPATIBLE}:
+            messagebox.showwarning("Import blocked", f"{validation.status}: {validation.message}")
+            return
         empty_indices = [i for i, slot in enumerate(self.bank.slots) if not slot.raw]
         try:
             if source_path.suffix.lower() == ".mnlgxdprog":
@@ -1081,6 +1151,10 @@ class MainWindow:
         if not path:
             return
         source_path = Path(path)
+        validation = validate_import_path(source_path)
+        if validation.status not in {COMPATIBLE, PROBABLY_COMPATIBLE}:
+            messagebox.showwarning("Import blocked", f"{validation.status}: {validation.message}")
+            return
         if source_path.suffix.lower() == ".mnlgxdlib":
             try:
                 library = load_mnlgxdlib(source_path)
@@ -1111,33 +1185,23 @@ class MainWindow:
     def refresh_bank_tree(self) -> None:
         if not hasattr(self, "bank_tree"):
             return
-        query = self.bank_search_var.get().lower() if hasattr(self, "bank_search_var") else ""
-        duplicates_only = self.show_duplicates_var.get() if hasattr(self, "show_duplicates_var") else False
         self.bank_tree.delete(*self.bank_tree.get_children())
-        for index, slot in enumerate(self.bank.slots):
-            slot_mapping = map_slot(index)
-            searchable = " ".join(
-                [
-                    slot.name or "",
-                    slot.status or "",
-                    slot.source or "",
-                    slot_mapping.display_number_text,
-                    slot_mapping.bank_slot_text,
-                    slot.short_hash or "",
-                    slot.notes or "",
-                ]
-            ).lower()
-            if query and query not in searchable:
-                continue
-            if duplicates_only and "duplicate" not in slot.status:
-                continue
+        visible_indices = [
+            index for index, slot in enumerate(self.bank.slots) if self.bank_slot_matches_filter(index, slot)
+        ]
+        if self.bank_sort_column:
+            visible_indices.sort(
+                key=lambda index: self.bank_sort_value(index, self.bank_sort_column or "slot"),
+                reverse=self.bank_sort_reverse,
+            )
+        for index in visible_indices:
+            slot = self.bank.slots[index]
             self.bank_tree.insert(
                 "",
                 tk.END,
                 iid=str(index),
                 values=(
-                    slot_mapping.display_number_text,
-                    slot_mapping.bank_slot_text,
+                    map_slot(index).display_number_text,
                     slot.name or "Empty",
                     slot.source,
                     slot.status or "empty",
@@ -1145,6 +1209,40 @@ class MainWindow:
                     slot.notes,
                 ),
             )
+        self.bank_count_var.set(f"{len(visible_indices)} / {len(self.bank.slots)} shown")
+
+    def bank_slot_matches_filter(self, index: int, slot) -> bool:
+        query = self.bank_search_var.get().strip().lower() if hasattr(self, "bank_search_var") else ""
+        if not query:
+            return True
+        slot_mapping = map_slot(index)
+        searchable = " ".join(
+            [
+                slot_mapping.display_number_text,
+                slot.name or "",
+                slot.source or "",
+                slot.status or "",
+                slot.short_hash or "",
+                slot.notes or "",
+            ]
+        ).lower()
+        return query in searchable
+
+    def bank_sort_value(self, index: int, column: str):
+        slot = self.bank.slots[index]
+        values = {
+            "slot": index + 1,
+            "name": (slot.name or "").casefold(),
+            "source": (slot.source or "").casefold(),
+            "status": (slot.status or "").casefold(),
+            "hash": (slot.short_hash or "").casefold(),
+            "notes": (slot.notes or "").casefold(),
+        }
+        return values.get(column, index)
+
+    def clear_bank_search(self) -> None:
+        self.bank_search_var.set("")
+        self.refresh_bank_tree()
 
     def selected_bank_indices(self) -> list[int]:
         return [int(item) for item in self.bank_tree.selection()]
@@ -1154,10 +1252,10 @@ class MainWindow:
             messagebox.showinfo("Empty bank", "No raw bank data is loaded.")
             return
         path = filedialog.asksaveasfilename(
-            defaultextension=".syx",
+            defaultextension=".mnlgxdlib",
             filetypes=[
-                ("SysEx", "*.syx"),
                 ("minilogue xd Library", "*.mnlgxdlib"),
+                ("SysEx", "*.syx"),
             ],
         )
         if path:
@@ -1219,6 +1317,17 @@ class MainWindow:
         indices = self.selected_bank_indices()
         if indices:
             self.bank.copy(indices[0])
+            slot = self.bank.slots[indices[0]]
+            self.append_log(log_line(f"Copied slot {indices[0] + 1:03d}: {slot.name or 'Empty'}"))
+
+    def cut_bank_slot(self) -> None:
+        indices = self.selected_bank_indices()
+        if not indices:
+            return
+        self.bank.copy(indices[0])
+        self.bank.clear_slot(indices[0])
+        self.mark_dirty(f"Cut slot {map_slot(indices[0]).display_number_text}")
+        self.refresh_bank_tree()
 
     def duplicate_bank_slot(self) -> None:
         indices = self.selected_bank_indices()
@@ -1234,6 +1343,13 @@ class MainWindow:
     def paste_bank_slot(self) -> None:
         indices = self.selected_bank_indices()
         if indices:
+            target = self.bank.slots[indices[0]]
+            if target.raw or target.prog_bin or target.name:
+                if not messagebox.askyesno(
+                    "Overwrite slot",
+                    f"Slot {indices[0] + 1:03d} is not empty. Overwrite it?",
+                ):
+                    return
             self.bank.paste(indices[0])
             self.mark_dirty(f'Pasted into {map_slot(indices[0]).bank_slot_text}')
             self.refresh_bank_tree()
@@ -1257,11 +1373,60 @@ class MainWindow:
 
     def clear_bank_slot(self) -> None:
         cleared = self.selected_bank_indices()
+        occupied = [index for index in cleared if self.bank.slots[index].raw or self.bank.slots[index].prog_bin or self.bank.slots[index].name]
+        if occupied and not messagebox.askyesno(
+            "Clear selected slot(s)",
+            f"Clear {len(occupied)} occupied slot(s) in the local workspace?",
+        ):
+            return
         for index in cleared:
             self.bank.clear_slot(index)
         if cleared:
             self.mark_dirty("Cleared " + ", ".join(map_slot(index).bank_slot_text for index in cleared[:10]))
         self.refresh_bank_tree()
+
+    def create_init_program_slot(self) -> None:
+        messagebox.showinfo(
+            "Init program template required",
+            "Create Init Program needs a verified init template from an imported bank. "
+            "Use Clear / Init to empty the local workspace slot for now.",
+        )
+
+    def save_selected_as_mnlgxdprog(self) -> None:
+        indices = self.selected_bank_indices()
+        if len(indices) != 1:
+            messagebox.showinfo("Select one program", "Select exactly one decoded program.")
+            return
+        slot = self.bank.slots[indices[0]]
+        programs = self.bank.export_programs(indices)
+        if not programs:
+            messagebox.showinfo("No decoded program", "The selected slot has no decoded minilogue xd program data.")
+            return
+        default_stem = safe_filename(slot.name.strip(), fallback=f"Slot_{indices[0] + 1:03d}")
+        default_name = default_stem + ".mnlgxdprog"
+        path = filedialog.asksaveasfilename(
+            title="Save as minilogue xd Program",
+            initialfile=default_name,
+            defaultextension=".mnlgxdprog",
+            filetypes=[("minilogue xd Program", "*.mnlgxdprog")],
+        )
+        if path:
+            save_mnlgxdprog(programs[0], Path(path))
+            self.append_log(log_line(f"Saved single program: {path}"))
+
+    def save_selected_as_sysex(self) -> None:
+        data = self.bank.export_selected_bytes(self.selected_bank_indices())
+        if not data:
+            messagebox.showinfo("No SysEx data", "The selected slot has no sendable SysEx data.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save selected as SysEx",
+            defaultextension=".syx",
+            filetypes=[("SysEx", "*.syx")],
+        )
+        if path:
+            Path(path).write_bytes(data)
+            self.append_log(log_line(f"Saved selected SysEx: {path}"))
 
     def sort_bank(self, reverse: bool) -> None:
         self.bank.sort_by_name(reverse)
@@ -1302,7 +1467,7 @@ class MainWindow:
         region = self.bank_tree.identify_region(event.x, event.y)
         column = self.bank_tree.identify_column(event.x)
         item = self.bank_tree.identify_row(event.y)
-        if region != "cell" or column != "#3" or not item.isdigit():
+        if region != "cell" or column != "#2" or not item.isdigit():
             return
         self.bank_tree.selection_set(item)
         self.rename_bank_slot()
@@ -1340,85 +1505,42 @@ class MainWindow:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(syx_path, syx_path.name)
             archive.write(manifest_path, manifest_path.name)
-        self.refresh_backup_list()
-
-    def refresh_backup_list(self) -> None:
-        if not hasattr(self, "backup_tree"):
-            return
-        self.backup_tree.delete(*self.backup_tree.get_children())
-        backup_dir = user_data_dir() / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        for manifest_path in sorted(backup_dir.glob("backup_*.json"), reverse=True):
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            source = Path(manifest.get("source", ""))
-            self.backup_tree.insert(
-                "",
-                tk.END,
-                iid=str(manifest_path),
-                values=(
-                    source.name,
-                    manifest.get("message_count", 0),
-                    manifest.get("total_bytes", 0),
-                    manifest_path.stem.replace("backup_", ""),
-                    manifest.get("notes", ""),
-                ),
-            )
-
-    def selected_backup_paths(self) -> list[Path]:
-        paths = []
-        for item in self.backup_tree.selection():
-            try:
-                manifest = json.loads(Path(item).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            paths.append(Path(manifest["source"]))
-        return paths
-
-    def load_selected_backup(self) -> None:
-        paths = self.selected_backup_paths()
-        if not paths:
-            return
-        self.loaded_records = read_sysex_file(paths[0])
-        self.loaded_source_path = str(paths[0])
-        self.analyzer_status_var.set(report_text(str(paths[0]), self.loaded_records))
-        self.tabs.select(self.midi_tab)
-
-    def send_selected_backup(self) -> None:
-        paths = self.selected_backup_paths()
-        if paths:
-            self.send_records(read_sysex_file(paths[0]), "selected backup")
-
-    def compare_backups(self) -> None:
-        paths = self.selected_backup_paths()
-        if len(paths) != 2:
-            messagebox.showinfo("Select two backups", "Select exactly two backups to compare.")
-            return
-        first = build_records(paths[0].read_bytes())
-        second = build_records(paths[1].read_bytes())
-        same = [a.sha256 == b.sha256 for a, b in zip(first, second)]
-        self.backup_status_var.set(
-            f"Compare: {paths[0].name} vs {paths[1].name} | "
-            f"messages {len(first)} / {len(second)} | matching positions {sum(same)}"
-        )
+        self.append_log(log_line(f"Created backup bundle: {zip_path}"))
 
     def refresh_user_units_trees(self) -> None:
         units = scan_user_units(user_units_dir())
-        for tree_name, wanted_kind in (("user_osc_tree", "osc"), ("user_fx_tree", "fx")):
+        for tree_name, wanted_kind, slot_count in (
+            ("user_osc_tree", "user-osc", 16),
+            ("user_fx_tree", "user-fx", 32),
+        ):
             if not hasattr(self, tree_name):
                 continue
             tree = getattr(self, tree_name)
             tree.delete(*tree.get_children())
-            for unit in units:
-                if wanted_kind not in unit.kind:
+            visible = [unit for unit in units if unit.kind == wanted_kind]
+            for slot_index in range(slot_count):
+                unit = visible[slot_index] if slot_index < len(visible) else None
+                if unit is None:
+                    tree.insert(
+                        "",
+                        tk.END,
+                        iid=f"{tree_name}:{slot_index}",
+                        values=(f"{slot_index + 1:02d}", "Empty", "", "", "empty", "", ""),
+                    )
                     continue
                 tree.insert(
                     "",
                     tk.END,
                     iid=str(unit.path),
-                    values=(unit.path.name, unit.kind, unit.size, unit.short_hash, unit.modified),
+                    values=(
+                        f"{slot_index + 1:02d}",
+                        unit.name,
+                        unit.module,
+                        unit.compatibility,
+                        unit.status,
+                        unit.path.name,
+                        unit.notes or f"{unit.size} bytes | {unit.short_hash}",
+                    ),
                 )
 
     def import_user_units(self) -> None:
@@ -1429,7 +1551,12 @@ class MainWindow:
         for path in paths:
             try:
                 unit = import_user_unit(Path(path), user_units_dir())
-                self.append_log(log_line(f"Imported user unit: {unit.path.name} ({unit.kind})"))
+                self.append_log(
+                    log_line(
+                        f"Imported user unit: {unit.path.name} | {unit.kind} | "
+                        f"{unit.compatibility} | {unit.status}"
+                    )
+                )
             except OSError as exc:
                 self.append_log(log_line(f"Could not import user unit {path}: {exc}"))
         self.refresh_user_units_trees()
@@ -1438,7 +1565,10 @@ class MainWindow:
         selected = []
         for tree_name in ("user_osc_tree", "user_fx_tree"):
             if hasattr(self, tree_name):
-                selected.extend(Path(item) for item in getattr(self, tree_name).selection())
+                for item in getattr(self, tree_name).selection():
+                    path = Path(item)
+                    if path.is_file():
+                        selected.append(path)
         if not selected:
             return
         if not messagebox.askyesno(
@@ -1462,18 +1592,10 @@ class MainWindow:
         )
 
     def export_user_units_manifest(self) -> None:
-        units = scan_user_units(user_units_dir())
-        if not units:
-            messagebox.showinfo("No user units", "No user-unit files are in the local library.")
-            return
-        path = filedialog.asksaveasfilename(
-            title="Export User Units Manifest",
-            defaultextension=".json",
-            filetypes=[("JSON manifest", "*.json")],
+        messagebox.showinfo(
+            "Manifest export removed",
+            "User OSC / FX now uses slot-based inventory. Manifest export is no longer part of the normal workflow.",
         )
-        if path:
-            export_manifest(Path(path), units)
-            self.append_log(log_line(f"Exported user-units manifest: {path}"))
 
     def view_selected_user_unit_manifest(self) -> None:
         """Show the manifest or basic metadata for the selected user unit."""
@@ -1613,6 +1735,86 @@ class MainWindow:
         else:
             self.append_log(log_line("Receive mode: Raw SysEx Capture."))
 
+    def request_current_from_xd(self) -> None:
+        self.start_receive_mode("single")
+        self.send_request_sysex(request_current_program(), "Request Current Preset")
+
+    def request_selected_slot_from_xd(self) -> None:
+        indices = self.selected_bank_indices()
+        slot_index = indices[0] if indices else simpledialog.askinteger(
+            "Request slot",
+            "Slot 001-500:",
+            minvalue=1,
+            maxvalue=500,
+        )
+        if slot_index is None:
+            return
+        if isinstance(slot_index, int) and slot_index >= 1 and not indices:
+            slot_index -= 1
+        self.start_receive_mode("single")
+        self.send_request_sysex(
+            request_program_slot(slot_index),
+            f"Request Slot {slot_index + 1:03d}",
+        )
+
+    def request_full_bank_from_xd(self) -> None:
+        if not messagebox.askyesno(
+            "Request full bank",
+            "Request all 500 program slots one by one from the minilogue xd?\n\n"
+            "This is non-destructive, but can take a while and needs hardware verification.",
+        ):
+            return
+        self.start_receive_mode("bank")
+        requests = [request_program_slot(index) for index in range(500)]
+        self.send_request_sysex_batch(requests, "Request Full Bank")
+
+    def send_request_sysex(self, raw: bytes, label: str) -> None:
+        self.send_request_sysex_batch([raw], label)
+
+    def send_request_sysex_batch(self, messages: list[bytes], label: str) -> None:
+        if not self.receiver.is_open or not self.selected_output_port():
+            messagebox.showwarning("No MIDI OUT", "Open the selected MIDI OUT port first.")
+            return
+        sender = self.receiver.make_sender()
+        self.current_sender = sender
+        try:
+            sent = sender.send_messages(
+                messages,
+                self.read_int(self.send_delay_var.get(), 80),
+                lambda index, total, length: self.listen_status_var.set(
+                    f"{label}: sent {index}/{total} request(s)"
+                ),
+            )
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.exception("%s failed.", label)
+            messagebox.showerror(label, str(exc))
+            self.flash_rx("error")
+        else:
+            self.append_log(log_line(f"{label}: sent {sent}/{len(messages)} request(s)."))
+        finally:
+            self.current_sender = None
+
+    def send_selected_to_buffer(self) -> None:
+        messagebox.showinfo(
+            "Send to buffer",
+            "Sending selected programs to the edit buffer is not verified yet. Use Send Selected for explicit slot SysEx transfer.",
+        )
+
+    def write_bank_to_xd(self) -> None:
+        if not messagebox.askyesno(
+            "Backup recommended",
+            "It is recommended to create a full backup before overwriting the minilogue xd.\n\n"
+            "Continue to send all populated bank slots without creating a backup now?",
+        ):
+            return
+        indices = [index for index, slot in enumerate(self.bank.slots) if slot.raw]
+        if not indices:
+            messagebox.showinfo("Nothing to send", "No sendable bank slots are loaded.")
+            return
+        self.bank_tree.selection_set([str(index) for index in indices])
+        self.send_selected_bank_slots()
+
     def mark_dirty(self, description: str) -> None:
         self.dirty = True
         if description:
@@ -1653,8 +1855,8 @@ class MainWindow:
         self.status_var.set(
             f"Ports open: {ports_open} | Last MIDI: {self.last_midi_info.message_type} "
             f"({self.last_midi_info.length} bytes) | Last SysEx: {self.last_sysex_info.length} bytes | "
-            f"Total MIDI: {self.total_messages} | SysEx: {self.total_sysex_messages} | "
-            f"SysEx bytes: {self.total_sysex_bytes} | Clock ignored: {self.clock_messages}"
+            f"Relevant MIDI: {self.total_messages} | SysEx: {self.total_sysex_messages} | "
+            f"SysEx bytes: {self.total_sysex_bytes}"
         )
         capture = self.sysex_buffer.capture
         capture_count = len(capture.messages) if capture else 0
@@ -1691,8 +1893,8 @@ class MainWindow:
             f"MIDI: {ports_open} | IN: {self.selected_input_port() or 'none'} | "
             f"OUT: {self.selected_output_port() or 'none'} | "
             f"Last SysEx: {'yes' if self.total_sysex_messages else 'no'} | "
-            f"Clock ignored: {'yes' if self.hide_midi_clock_var.get() else 'no'} "
-            f"({self.clock_messages}) | Capture: {capture_state}"
+            f"Realtime hidden: {'yes' if self.hide_midi_clock_var.get() else 'no'} | "
+            f"Capture: {capture_state}"
         )
 
     def save_successful_sysex_ports(self, timestamp: float) -> None:

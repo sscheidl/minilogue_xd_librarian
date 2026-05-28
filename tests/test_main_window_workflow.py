@@ -73,8 +73,18 @@ class MainWindowWorkflowTest(unittest.TestCase):
 
         report = window.build_diagnostic_report()
 
-        self.assertIn("Version: 0.3.1", report)
+        self.assertIn("Version: 0.4.0", report)
         self.assertNotIn("Version: unknown", report)
+
+    def test_v04_tabs_and_bank_columns(self):
+        window = self.make_window()
+
+        self.assertEqual(
+            [window.tabs.tab(tab, "text") for tab in window.tabs.tabs()],
+            ["Programs / Banks", "Transfer / SysEx", "User OSC", "User FX", "Options"],
+        )
+        self.assertEqual(tuple(window.bank_tree["columns"]), ("slot", "name", "source", "status", "hash", "notes"))
+        self.assertEqual(window.bank_count_var.get(), "500 / 500 shown")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.0-consolidated-workflow - 2026-05-28
+
+### New Features
+
+- Removed the separate Backups tab; backup remains available as a workflow action.
+- Consolidated the main tab set to Programs / Banks, Transfer / SysEx, User OSC, User FX and Options.
+- Simplified Programs / Banks table to Slot, Program Name, Source, Status, Hash and Notes.
+- Added live bank search with visible `n / 500 shown` result count.
+- Added view-only table-header sorting without changing the actual bank order.
+- Added a right-click context menu for bank edit/export/send/request operations.
+- Added request builders for current program and slot requests.
+- Added defensive import validation statuses for programs, libraries, SysEx and user units.
+- Added User OSC / User FX slot-oriented inventory display with compatibility/status columns.
+- Added defensive minilogue xd SysEx command classification.
+
+### Safety / Compatibility Notes
+
+- MIDI realtime messages no longer count as relevant MIDI events.
+- Unknown/incompatible imports are blocked from the active workspace instead of silently accepted.
+- Full-bank request is iterative and still needs hardware verification.
+- User-unit send actions remain disabled until compatibility and transfer behavior are verified.
+
 ## v0.3.0-format-layer - 2026-05-28
 
 ### New Features
