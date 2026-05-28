@@ -32,6 +32,7 @@ The app now provides a broad prototype workbench:
 - User OSC / User FX local file inventory with import, remove and manifest export.
 - Bank slot reordering by drag inside the table.
 - App log file under the user data folder.
+- Entry-point startup logging and Tkinter initialization error reporting.
 - Windows onedir PyInstaller build scripts.
 
 ## Safety

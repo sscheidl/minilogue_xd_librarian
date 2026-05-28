@@ -96,7 +96,7 @@ class MainWindow:
         self.refresh_user_units_tree()
         self.update_status()
 
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(50, self.process_queue)
         self.root.after(100, self.check_capture_timeouts)
 
@@ -1150,7 +1150,8 @@ class MainWindow:
         except ValueError:
             return default
 
-    def close(self) -> None:
+    def on_close(self) -> None:
+        """Close MIDI resources, persist settings and destroy the root window."""
         self.settings["last_midi_in"] = self.selected_input_port()
         self.settings["last_midi_out"] = self.selected_output_port()
         self.settings["inactivity_ms"] = self.read_int(self.inactivity_ms_var.get(), 500)
@@ -1159,3 +1160,7 @@ class MainWindow:
         self.persist_settings()
         self.receiver.close_ports()
         self.root.destroy()
+
+    def close(self) -> None:
+        """Backward-compatible alias used by tests and older entry points."""
+        self.on_close()

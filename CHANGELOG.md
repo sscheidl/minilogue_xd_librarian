@@ -20,6 +20,7 @@
 - Added User Units tab for local User OSC / User FX file inventory.
 - Added bank slot drag reorder inside the bank table.
 - Added app log file writing under the user data folder.
+- Added entry-point logging, Tkinter startup error handling and explicit close hook wiring.
 - Added unit tests for SysEx splitting and offline bank operations.
 - Added PyInstaller spec and Windows build scripts.
 
