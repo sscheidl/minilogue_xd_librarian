@@ -15,6 +15,7 @@ dist/
 *.egg-info/
 minilogue_xd_librarian_debug.spec
 minilogue_xd_librarian_codex*.md
+minilogue_xd_format_layer_codex_auftrag.md
 libraries/
 
 dumps/*.syx

@@ -1,6 +1,6 @@
 # minilogue xd Librarian
 
-Current milestone: v0.2.0-gui-rework  
+Current milestone: v0.3.0-format-layer  
 Target platform: Windows 11  
 Runtime: Python 3.10+  
 License: TBD
@@ -22,18 +22,24 @@ The app now provides a broad prototype workbench:
 - Persistent settings for the last successful SysEx port pair.
 - Separate last MIDI and last SysEx summaries, so MIDI Clock does not overwrite SysEx diagnostics.
 - SysEx capture, inactivity finalization and `.syx` saving.
-- `.syx`, `.mnlgxdprog` and `.mnlgxdlib` raw file loading.
+- Verified `.mnlgxdprog`, `.mnlgxdlib` and clean `.syx` program-dump import.
+- `.mnlgxdlib` and `.syx` export from decoded bank data.
+- `.mnlgxdunit` manifest and payload import/export helpers.
+- Canonical 1024-byte program model with validated `PROG` signature.
+- Program-name decoding and writing at bytes `4:16`.
 - SysEx splitting, hashing and heuristic dump classification.
 - Analyzer report export as `.txt` and `.json`.
 - Explicit raw SysEx send for complete `F0...F7` messages only, with confirmation and delay.
 - Preset workspace for loading, filtering, duplicating, deleting, exporting and sending raw messages.
 - 500-slot offline bank workspace.
-- Offline bank operations: rename display name, copy, paste, move, swap, clear, sort and undo.
+- Offline bank operations: rename program, copy, paste, move, swap, clear, sort and undo.
+- Double-click rename in the program-name column.
+- Bank slot reordering by drag inside the table.
 - Duplicate detection by hash.
 - Backup creation with `.syx`, JSON manifest and ZIP bundle.
 - Backup loading, sending and basic comparison.
 - User OSC / User FX local file inventory with import, remove and manifest export.
-- Bank slot reordering by drag inside the table.
+- CLI helpers under `tools/` for inspection, SysEx export and library splitting.
 - App log file under the user data folder.
 - Entry-point startup logging and Tkinter initialization error reporting.
 - Windows onedir PyInstaller build scripts.
@@ -111,19 +117,19 @@ The app marks likely Port-2 candidates as possible SysEx/Librarian ports, but al
 6. Click `Open Ports`.
 7. Click `Test selected ports` or `Listen for SysEx`.
 8. Trigger a Program Dump or All Dump on the minilogue xd.
-9. Confirm that MIDI Clock does not flood the Transfer / SysEx log.
-10. Confirm that last SysEx still shows `F0`, `F7` and Korg `0x42` even if MIDI Clock arrives afterward.
-11. Save the capture as `.syx`.
-12. Load the saved `.syx`, export an analyzer report and verify message count/bytes.
-13. Create a backup and verify that `.syx`, `.json` and `.zip` are created under the app data backup folder.
+9. Open `All Presets.mnlgxdlib` or a clean program-dump `.syx` and confirm decoded program names appear.
+10. Double-click a program name, rename it and confirm the new name remains after export/import.
+11. Drag a bank row onto another row and confirm the program moves to the target slot.
+12. Confirm that MIDI Clock does not flood the Transfer / SysEx log.
+13. Confirm that last SysEx still shows `F0`, `F7` and Korg `0x42` even if MIDI Clock arrives afterward.
+14. Save the capture as `.syx`.
+15. Load the saved `.syx`, export an analyzer report and verify message count/bytes.
+16. Create a backup and verify that `.syx`, `.json` and `.zip` are created under the app data backup folder.
 
 ## Known Limitations
 
-- `.mnlgxdprog` and `.mnlgxdlib` structures are not fully decoded yet.
-- Program names are not safely decoded from raw data yet.
 - Bank import from unknown files is raw/experimental and preserves bytes.
-- Rename is a display override in the workspace, not a verified write into program data.
-- Drag and drop inside the bank grid is not implemented yet.
+- AddInfo `.syx` files are diagnostic/metadata dumps and are not imported as sendable programs.
 - User OSC and User FX transfer is not implemented yet; local file inventory only.
 - Microtuning management is not implemented yet.
 - Hardware send workflows need careful real-device testing before daily use.
@@ -132,11 +138,11 @@ The app marks likely Port-2 candidates as possible SysEx/Librarian ports, but al
 
 ```powershell
 python -m unittest
-python -m compileall .
+python -m compileall app devices midi models librarian tests utils xd_formats tools main.py
 ```
 
 ## Suggested Commit Message
 
 ```text
-v0.2.0: Rework GUI and filter MIDI clock
+v0.3.0: Add verified minilogue xd format layer
 ```

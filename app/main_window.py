@@ -43,6 +43,15 @@ from midi.receiver import MidiReceiver, QueuedMidiError, QueuedMidiMessage
 from midi.sysex_buffer import SysexBuffer
 from utils.hexview import format_hex
 from utils.logger import append_to_file, log_line
+from xd_formats import (
+    XDLibrary,
+    encode_program_dump,
+    import_sysex_programs,
+    load_mnlgxdlib,
+    load_mnlgxdprog,
+    save_mnlgxdlib,
+    write_sysex_programs,
+)
 
 
 class MainWindow:
@@ -357,6 +366,7 @@ class MainWindow:
         self.bank_tree.grid(row=1, column=0, sticky="nsew")
         self.bank_tree.bind("<ButtonPress-1>", self.on_bank_drag_start)
         self.bank_tree.bind("<ButtonRelease-1>", self.on_bank_drag_release)
+        self.bank_tree.bind("<Double-1>", self.on_bank_double_click)
 
     def _build_backups_tab(self) -> None:
         self.backups_tab.columnconfigure(0, weight=1)
@@ -872,7 +882,21 @@ class MainWindow:
         )
         if not path:
             return
-        records = read_sysex_file(Path(path))
+        source_path = Path(path)
+        if source_path.suffix.lower() == ".mnlgxdprog":
+            try:
+                program = load_mnlgxdprog(source_path)
+                records = [self.program_to_record(program, 1)]
+            except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                messagebox.showerror("Open failed", str(exc))
+                return
+        elif source_path.suffix.lower() == ".syx":
+            programs = import_sysex_programs(source_path)
+            records = [self.program_to_record(program, index + 1) for index, program in enumerate(programs)]
+            if not records:
+                records = read_sysex_file(source_path)
+        else:
+            records = read_sysex_file(source_path)
         self.preset_records.extend(records)
         self.loaded_source_path = path
         if hasattr(self, "preset_tree"):
@@ -885,14 +909,42 @@ class MainWindow:
         )
         if not path:
             return
-        records = read_sysex_file(Path(path))
+        source_path = Path(path)
         empty_indices = [i for i, slot in enumerate(self.bank.slots) if not slot.raw]
+        try:
+            if source_path.suffix.lower() == ".mnlgxdprog":
+                programs = [load_mnlgxdprog(source_path)]
+            elif source_path.suffix.lower() == ".syx":
+                programs = import_sysex_programs(source_path)
+            else:
+                programs = []
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            messagebox.showerror("Open failed", str(exc))
+            return
+        if programs:
+            self.bank.remember()
+            for program, index in zip(programs, empty_indices):
+                slot = self.bank.slots[index]
+                raw = self.program_to_record(program, index + 1).raw
+                slot.name = program.name
+                slot.source = path
+                slot.raw = raw
+                slot.prog_bin = program.prog_bin
+                slot.sha256 = self.bank.hash_raw(program.prog_bin)
+                slot.status = program.source_type or source_path.suffix.lower().lstrip(".")
+                slot.notes = "Decoded minilogue xd program data."
+            self.bank.mark_duplicates()
+            self.refresh_bank_tree()
+            return
+
+        records = read_sysex_file(source_path)
         self.bank.remember()
         for record, index in zip(records, empty_indices):
             slot = self.bank.slots[index]
             slot.name = f"Program {index + 1:03d}"
             slot.source = path
             slot.raw = record.raw
+            slot.prog_bin = b""
             slot.sha256 = record.sha256
             slot.status = record.dump_type
             slot.notes = "Loaded as preset into offline bank workspace."
@@ -971,7 +1023,25 @@ class MainWindow:
         )
         if not path:
             return
-        records = read_sysex_file(Path(path))
+        source_path = Path(path)
+        if source_path.suffix.lower() == ".mnlgxdlib":
+            try:
+                library = load_mnlgxdlib(source_path)
+            except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                messagebox.showerror("Open failed", str(exc))
+                return
+            self.bank.load_programs(library.programs, path, "mnlgxdlib")
+            self.refresh_bank_tree()
+            self.append_log(log_line(f"Loaded {len(library.programs)} decoded program(s) from {path}"))
+            return
+        if source_path.suffix.lower() == ".syx":
+            programs = import_sysex_programs(source_path)
+            if programs:
+                self.bank.load_programs(programs, path, "syx")
+                self.refresh_bank_tree()
+                self.append_log(log_line(f"Loaded {len(programs)} decoded SysEx program dump(s) from {path}"))
+                return
+        records = read_sysex_file(source_path)
         self.bank.load_records(records, path)
         self.refresh_bank_tree()
 
@@ -1005,21 +1075,44 @@ class MainWindow:
         return [int(item) for item in self.bank_tree.selection()]
 
     def save_bank_copy(self) -> None:
-        data = b"".join(slot.raw for slot in self.bank.slots if slot.raw)
-        if not data:
+        if not any(slot.raw or slot.prog_bin for slot in self.bank.slots):
             messagebox.showinfo("Empty bank", "No raw bank data is loaded.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".syx", filetypes=[("SysEx", "*.syx")])
+        path = filedialog.asksaveasfilename(
+            defaultextension=".syx",
+            filetypes=[
+                ("SysEx", "*.syx"),
+                ("minilogue xd Library", "*.mnlgxdlib"),
+            ],
+        )
         if path:
-            Path(path).write_bytes(data)
+            target = Path(path)
+            programs = self.bank.export_programs()
+            if target.suffix.lower() == ".mnlgxdlib":
+                if len(programs) != 500:
+                    messagebox.showwarning(
+                        "Incomplete library",
+                        f"A .mnlgxdlib export needs 500 decoded programs; found {len(programs)}.",
+                    )
+                    return
+                save_mnlgxdlib(XDLibrary(programs=programs), target)
+            elif programs:
+                write_sysex_programs(programs, target)
+            else:
+                target.write_bytes(b"".join(slot.raw for slot in self.bank.slots if slot.raw))
 
     def export_selected_bank_slots(self) -> None:
-        data = self.bank.export_selected_bytes(self.selected_bank_indices())
-        if not data:
+        indices = self.selected_bank_indices()
+        programs = self.bank.export_programs(indices)
+        data = self.bank.export_selected_bytes(indices)
+        if not data and not programs:
             return
         path = filedialog.asksaveasfilename(defaultextension=".syx", filetypes=[("SysEx", "*.syx")])
         if path:
-            Path(path).write_bytes(data)
+            if programs:
+                write_sysex_programs(programs, path)
+            else:
+                Path(path).write_bytes(data)
 
     def send_selected_bank_slots(self) -> None:
         records = [
@@ -1033,7 +1126,11 @@ class MainWindow:
         indices = self.selected_bank_indices()
         if not indices:
             return
-        name = simpledialog.askstring("Rename display name", "New display name:")
+        name = simpledialog.askstring(
+            "Rename program",
+            "New program name:",
+            initialvalue=self.bank.slots[indices[0]].name,
+        )
         if name is not None:
             self.bank.rename(indices[0], name)
             self.refresh_bank_tree()
@@ -1109,6 +1206,29 @@ class MainWindow:
                     )
                 )
         self.bank_drag_start_index = None
+
+    def on_bank_double_click(self, event: tk.Event) -> None:
+        region = self.bank_tree.identify_region(event.x, event.y)
+        column = self.bank_tree.identify_column(event.x)
+        item = self.bank_tree.identify_row(event.y)
+        if region != "cell" or column != "#3" or not item.isdigit():
+            return
+        self.bank_tree.selection_set(item)
+        self.rename_bank_slot()
+
+    @staticmethod
+    def program_to_record(program, index: int) -> SysexRecord:
+        raw = encode_program_dump(program, index - 1)
+        return SysexRecord(
+            index=index,
+            raw=raw,
+            length=len(raw),
+            manufacturer_id=0x42,
+            is_korg=True,
+            dump_type=program.source_type or "program-dump",
+            sha256=OfflineBank.hash_raw(program.prog_bin),
+            notes=program.name,
+        )
 
     def save_capture_backup(self) -> None:
         data = self.sysex_buffer.to_bytes()

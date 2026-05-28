@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.0-format-layer - 2026-05-28
+
+### New Features
+
+- Added `xd_formats` import/export layer for `.mnlgxdprog`, `.mnlgxdlib`, `.syx` program dumps and `.mnlgxdunit`.
+- Added verified minilogue xd 7-bit SysEx codec; exporting `All Presets.mnlgxdlib` matches `All Presets_CleanDump.syx` byte-for-byte against local fixtures.
+- Added canonical 1024-byte `XDProgram` model with validated `PROG` signature and name handling at bytes `4:16`.
+- Added library operations for move, swap, sort, rename, init replacement and program export.
+- Added CLI tools for file inspection, library-to-SysEx export and library splitting.
+- Bank imports now decode real `.mnlgxdlib`, `.mnlgxdprog` and clean `.syx` program dumps.
+- Bank rename writes verified program-name bytes when decoded program data is available.
+- Added double-click rename on the program-name column and retained table drag-and-drop slot moving.
+
+### Safety / Compatibility Notes
+
+- AddInfo `.syx` messages are recognized as non-program data and are not imported as sendable program dumps.
+- User unit payload signatures are reported conservatively; unknown signatures produce warnings instead of guessed categories.
+
 ## v0.2.0-gui-rework - 2026-05-28
 
 ### New Features

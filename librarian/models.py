@@ -40,6 +40,7 @@ class BankSlot:
     name: str = ""
     source: str = ""
     raw: bytes = b""
+    prog_bin: bytes = b""
     sha256: str = ""
     status: str = "empty"
     notes: str = ""
@@ -62,6 +63,7 @@ class BankWorkspace:
                 name=slot.name,
                 source=slot.source,
                 raw=slot.raw,
+                prog_bin=slot.prog_bin,
                 sha256=slot.sha256,
                 status=slot.status,
                 notes=slot.notes,
@@ -76,6 +78,7 @@ class BankWorkspace:
                 name=slot.name,
                 source=slot.source,
                 raw=slot.raw,
+                prog_bin=slot.prog_bin,
                 sha256=slot.sha256,
                 status=slot.status,
                 notes=slot.notes,
