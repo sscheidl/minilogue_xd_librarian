@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import platform
+import sys
 import time
 import tkinter as tk
 import zipfile
@@ -59,9 +63,7 @@ class MainWindow:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("minilogue xd Librarian - MIDI Test")
-        self.root.geometry("1180x780")
-        self.root.minsize(980, 680)
+        self.app_title = "minilogue xd Librarian"
 
         self.message_queue: Queue[QueuedMidiMessage | QueuedMidiError] = Queue()
         self.receiver = MidiReceiver(self.message_queue)
@@ -93,9 +95,15 @@ class MainWindow:
         self.listen_saw_midi = False
         self.listen_saw_clock = False
         self.listen_saw_sysex = False
+        self.receive_mode = "raw"
+        self.dirty = False
+        self.change_log: list[str] = []
+        self.last_error = ""
+        self.logger = logging.getLogger(__name__)
 
         self.input_port_var = tk.StringVar()
         self.output_port_var = tk.StringVar()
+        self.receive_mode_var = tk.StringVar(value="Raw SysEx Capture")
         self.show_sysex_only_var = tk.BooleanVar(value=self.settings.get("show_sysex_only", True))
         self.hide_midi_clock_var = tk.BooleanVar(value=self.settings.get("hide_midi_clock", True))
         self.show_realtime_var = tk.BooleanVar(value=self.settings.get("show_realtime", False))
@@ -122,7 +130,6 @@ class MainWindow:
         self.refresh_user_units_trees()
         self.update_status()
 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(50, self.process_queue)
         self.root.after(100, self.check_capture_timeouts)
 
@@ -187,7 +194,9 @@ class MainWindow:
         button_specs = [
             ("Refresh Ports", self.refresh_ports),
             ("Open Ports", self.open_ports),
-            ("Listen for SysEx", self.listen_for_sysex),
+            ("Receive Single", lambda: self.start_receive_mode("single")),
+            ("Receive Bank", lambda: self.start_receive_mode("bank")),
+            ("Raw Capture", lambda: self.start_receive_mode("raw")),
             ("Close Ports", self.close_ports),
             ("Clear Log", self.clear_log),
             ("Save Capture", self.save_sysex_dump),
@@ -259,6 +268,13 @@ class MainWindow:
         ).grid(row=2, column=0, sticky="sew", pady=(12, 0))
 
     def _build_presets_tab(self) -> None:
+        """Build the optional preset workspace tab.
+
+        This tab is currently not wired into the main notebook. Keep the method
+        harmless if it is called before ``self.presets_tab`` exists.
+        """
+        if not hasattr(self, "presets_tab"):
+            return
         self.presets_tab.columnconfigure(0, weight=1)
         self.presets_tab.rowconfigure(1, weight=1)
 
@@ -312,8 +328,7 @@ class MainWindow:
         bank_buttons = [
             ("Open Bank", self.open_bank),
             ("Open Preset", self.open_preset_into_bank),
-            ("Save Bank", self.save_bank_copy),
-            ("Save Bank As", self.save_bank_copy),
+            ("Save Bank / Export As", self.save_bank_copy),
             ("Export Selected", self.export_selected_bank_slots),
             ("Receive from XD", self.listen_for_sysex),
             ("Send Selected", self.send_selected_bank_slots),
@@ -328,6 +343,7 @@ class MainWindow:
             ("Sort A-Z", lambda: self.sort_bank(False)),
             ("Sort Z-A", lambda: self.sort_bank(True)),
             ("Undo", self.undo_bank),
+            ("Change Log", self.show_change_log),
         ]
         for index, (text, command) in enumerate(bank_buttons):
             ttk.Button(controls, text=text, command=command).grid(row=index // 8, column=index % 8, padx=(0, 5), pady=(0, 4))
@@ -416,6 +432,7 @@ class MainWindow:
                 ("Import Files", self.import_user_units),
                 ("Remove From Library", self.remove_selected_user_units),
                 ("Export Manifest", self.export_user_units_manifest),
+                ("View Manifest", self.view_selected_user_unit_manifest),
                 ("Refresh", self.refresh_user_units_trees),
                 ("Send", self.user_unit_send_not_implemented),
             ]
@@ -471,8 +488,12 @@ class MainWindow:
                 ("Refresh Ports", self.refresh_ports),
                 ("Open Ports", self.open_ports),
                 ("Close Ports", self.close_ports),
-                ("Test selected ports", self.listen_for_sysex),
+                ("MIDI Connection Test", self.midi_connection_test),
+                ("Receive Raw SysEx", lambda: self.start_receive_mode("raw")),
                 ("Save Port Combination", self.save_current_port_combination),
+                ("Open Log Folder", self.open_log_folder),
+                ("Copy Diagnostic Report", self.copy_diagnostic_report),
+                ("About", self.show_about),
                 ("Clear communication status", self.clear_communication_status),
             ]
         ):
@@ -587,12 +608,24 @@ class MainWindow:
         )
 
     @staticmethod
-    def select_port_label(variable: tk.StringVar, mapping: dict[str, str], preferred: str | None, labels: list[str]) -> None:
-        for candidate in (preferred, mapping.get(variable.get(), variable.get())):
-            if not candidate:
-                continue
+    def select_port_label(
+        variable: tk.StringVar,
+        mapping: dict[str, str],
+        preferred: str | None,
+        labels: list[str],
+    ) -> None:
+        """Select the best visible combobox label while preserving valid choices."""
+        if preferred:
             for label, port in mapping.items():
-                if port == candidate:
+                if port == preferred:
+                    variable.set(label)
+                    return
+        if variable.get() in mapping:
+            return
+        current_port = mapping.get(variable.get(), variable.get())
+        if current_port:
+            for label, port in mapping.items():
+                if port == current_port:
                     variable.set(label)
                     return
         variable.set(labels[0] if labels else "")
@@ -705,11 +738,11 @@ class MainWindow:
             self.append_sysex_log(now, item.raw, info)
             if self.listen_active:
                 self.listen_saw_sysex = True
-                self.listen_status_var.set("Port test: SysEx received on selected IN port")
+                self.listen_status_var.set(f"{self.receive_mode_var.get()}: SysEx received on selected IN port")
             if info.is_korg:
                 self.save_successful_sysex_ports(now)
                 if self.listen_active:
-                    self.listen_status_var.set("Port test: Korg SysEx detected")
+                    self.listen_status_var.set(f"{self.receive_mode_var.get()}: Korg SysEx detected")
         else:
             if self.listen_active and not self.listen_saw_sysex:
                 if info.message_type == "clock":
@@ -845,10 +878,26 @@ class MainWindow:
         if not self.receiver.is_open or not self.selected_output_port():
             messagebox.showwarning("No MIDI OUT", "Open the selected MIDI OUT port first.")
             return
+        total_bytes = sum(len(record.raw) for record in records)
+        warning = ""
+        if len(records) >= 500:
+            warning = "\n\nWarning: This may overwrite the complete program bank on the device."
+        elif len(records) > 1:
+            warning = "\n\nWarning: This may overwrite multiple program slots on the device."
+        preview_names = [record.notes for record in records if getattr(record, "notes", "")]
+        preview = ", ".join(preview_names[:5]) if preview_names else label
+        if len(preview_names) > 5:
+            preview += ", ..."
         if not messagebox.askyesno(
             "Confirm SysEx send",
-            f"Send {len(records)} raw SysEx message(s) to:\n{self.selected_output_port()}\n\n"
-            "This is an explicit transfer action. Continue?",
+            "You are about to send "
+            f"{len(records)} SysEx message(s) to the minilogue xd.\n\n"
+            f"Target MIDI OUT:\n{self.selected_output_port()}\n\n"
+            f"Source / program(s):\n{preview}\n\n"
+            f"Message count: {len(records)}\n"
+            f"Total bytes: {total_bytes}\n"
+            f"{warning}\n\n"
+            "This may overwrite data on the device. Continue?",
         ):
             return
         sender = self.receiver.make_sender()
@@ -863,6 +912,9 @@ class MainWindow:
                 ),
             )
         except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.exception("Send failed.")
+            self.append_log(log_line(f"Send failed: {exc}"))
             messagebox.showerror("Send failed", str(exc))
             self.flash_rx("error")
             return
@@ -934,6 +986,7 @@ class MainWindow:
                 slot.status = program.source_type or source_path.suffix.lower().lstrip(".")
                 slot.notes = "Decoded minilogue xd program data."
             self.bank.mark_duplicates()
+            self.mark_dirty(f"Imported {len(programs)} decoded program(s) into bank workspace")
             self.refresh_bank_tree()
             return
 
@@ -949,6 +1002,7 @@ class MainWindow:
             slot.status = record.dump_type
             slot.notes = "Loaded as preset into offline bank workspace."
         self.bank.mark_duplicates()
+        self.mark_dirty(f"Imported {len(records)} raw record(s) into bank workspace")
         self.refresh_bank_tree()
 
     def refresh_preset_tree(self) -> None:
@@ -1031,6 +1085,8 @@ class MainWindow:
                 messagebox.showerror("Open failed", str(exc))
                 return
             self.bank.load_programs(library.programs, path, "mnlgxdlib")
+            self.clear_dirty_state()
+            self.change_log.clear()
             self.refresh_bank_tree()
             self.append_log(log_line(f"Loaded {len(library.programs)} decoded program(s) from {path}"))
             return
@@ -1038,11 +1094,15 @@ class MainWindow:
             programs = import_sysex_programs(source_path)
             if programs:
                 self.bank.load_programs(programs, path, "syx")
+                self.clear_dirty_state()
+                self.change_log.clear()
                 self.refresh_bank_tree()
                 self.append_log(log_line(f"Loaded {len(programs)} decoded SysEx program dump(s) from {path}"))
                 return
         records = read_sysex_file(source_path)
         self.bank.load_records(records, path)
+        self.clear_dirty_state()
+        self.change_log.clear()
         self.refresh_bank_tree()
 
     def refresh_bank_tree(self) -> None:
@@ -1052,7 +1112,19 @@ class MainWindow:
         duplicates_only = self.show_duplicates_var.get() if hasattr(self, "show_duplicates_var") else False
         self.bank_tree.delete(*self.bank_tree.get_children())
         for index, slot in enumerate(self.bank.slots):
-            if query and query not in slot.name.lower() and query not in slot.status.lower():
+            slot_mapping = map_slot(index)
+            searchable = " ".join(
+                [
+                    slot.name or "",
+                    slot.status or "",
+                    slot.source or "",
+                    slot_mapping.display_number_text,
+                    slot_mapping.bank_slot_text,
+                    slot.short_hash or "",
+                    slot.notes or "",
+                ]
+            ).lower()
+            if query and query not in searchable:
                 continue
             if duplicates_only and "duplicate" not in slot.status:
                 continue
@@ -1061,8 +1133,8 @@ class MainWindow:
                 tk.END,
                 iid=str(index),
                 values=(
-                    map_slot(index).display_number_text,
-                    map_slot(index).bank_slot_text,
+                    slot_mapping.display_number_text,
+                    slot_mapping.bank_slot_text,
                     slot.name or "Empty",
                     slot.source,
                     slot.status or "empty",
@@ -1100,6 +1172,8 @@ class MainWindow:
                 write_sysex_programs(programs, target)
             else:
                 target.write_bytes(b"".join(slot.raw for slot in self.bank.slots if slot.raw))
+            self.clear_dirty_state()
+            self.append_log(log_line(f"Saved bank/export: {target}"))
 
     def export_selected_bank_slots(self) -> None:
         indices = self.selected_bank_indices()
@@ -1113,6 +1187,7 @@ class MainWindow:
                 write_sysex_programs(programs, path)
             else:
                 Path(path).write_bytes(data)
+            self.append_log(log_line(f"Exported selected bank slot(s): {path}"))
 
     def send_selected_bank_slots(self) -> None:
         records = [
@@ -1132,7 +1207,9 @@ class MainWindow:
             initialvalue=self.bank.slots[indices[0]].name,
         )
         if name is not None:
+            old_name = self.bank.slots[indices[0]].name
             self.bank.rename(indices[0], name)
+            self.mark_dirty(f'Renamed {map_slot(indices[0]).bank_slot_text}: "{old_name}" -> "{name}"')
             self.refresh_bank_tree()
 
     def copy_bank_slot(self) -> None:
@@ -1148,12 +1225,14 @@ class MainWindow:
         empty_indices = [i for i, slot in enumerate(self.bank.slots) if not slot.raw]
         if empty_indices:
             self.bank.paste(empty_indices[0])
+            self.mark_dirty(f'Duplicated {map_slot(indices[0]).bank_slot_text} into {map_slot(empty_indices[0]).bank_slot_text}')
             self.refresh_bank_tree()
 
     def paste_bank_slot(self) -> None:
         indices = self.selected_bank_indices()
         if indices:
             self.bank.paste(indices[0])
+            self.mark_dirty(f'Pasted into {map_slot(indices[0]).bank_slot_text}')
             self.refresh_bank_tree()
 
     def move_bank_slot(self) -> None:
@@ -1163,25 +1242,32 @@ class MainWindow:
         target = simpledialog.askinteger("Move to slot", "Target slot 1-500:", minvalue=1, maxvalue=500)
         if target:
             self.bank.move(indices[0], target - 1)
+            self.mark_dirty(f'Moved {map_slot(indices[0]).bank_slot_text} -> {map_slot(target - 1).bank_slot_text}')
             self.refresh_bank_tree()
 
     def swap_bank_slots(self) -> None:
         indices = self.selected_bank_indices()
         if len(indices) == 2:
             self.bank.swap(indices[0], indices[1])
+            self.mark_dirty(f'Swapped {map_slot(indices[0]).bank_slot_text} <-> {map_slot(indices[1]).bank_slot_text}')
             self.refresh_bank_tree()
 
     def clear_bank_slot(self) -> None:
-        for index in self.selected_bank_indices():
+        cleared = self.selected_bank_indices()
+        for index in cleared:
             self.bank.clear_slot(index)
+        if cleared:
+            self.mark_dirty("Cleared " + ", ".join(map_slot(index).bank_slot_text for index in cleared[:10]))
         self.refresh_bank_tree()
 
     def sort_bank(self, reverse: bool) -> None:
         self.bank.sort_by_name(reverse)
+        self.mark_dirty("Sorted bank Z-A" if reverse else "Sorted bank A-Z")
         self.refresh_bank_tree()
 
     def undo_bank(self) -> None:
         self.bank.undo()
+        self.mark_dirty("Undo bank operation")
         self.refresh_bank_tree()
 
     def on_bank_drag_start(self, event: tk.Event) -> None:
@@ -1198,11 +1284,13 @@ class MainWindow:
         if item and item.isdigit():
             target = int(item)
             if target != self.bank_drag_start_index:
-                self.bank.move(self.bank_drag_start_index, target)
+                source = self.bank_drag_start_index
+                self.bank.move(source, target)
+                self.mark_dirty(f"Moved {map_slot(source).bank_slot_text} -> {map_slot(target).bank_slot_text} by drag")
                 self.refresh_bank_tree()
                 self.append_log(
                     log_line(
-                        f"Moved bank slot {self.bank_drag_start_index + 1} to {target + 1} by drag."
+                        f"Moved bank slot {source + 1} to {target + 1} by drag."
                     )
                 )
         self.bank_drag_start_index = None
@@ -1384,6 +1472,179 @@ class MainWindow:
             export_manifest(Path(path), units)
             self.append_log(log_line(f"Exported user-units manifest: {path}"))
 
+    def view_selected_user_unit_manifest(self) -> None:
+        """Show the manifest or basic metadata for the selected user unit."""
+        selected: list[Path] = []
+        for tree_name in ("user_osc_tree", "user_fx_tree"):
+            if hasattr(self, tree_name):
+                selected.extend(Path(item) for item in getattr(self, tree_name).selection())
+        if not selected:
+            messagebox.showinfo("No user unit selected", "Select a User OSC or User FX file first.")
+            return
+        path = selected[0]
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
+                manifest_name = next(
+                    (name for name in names if name.endswith("manifest.json")),
+                    None,
+                )
+                if manifest_name:
+                    content = archive.read(manifest_name).decode("utf-8", errors="replace")
+                else:
+                    content = "No manifest.json found.\n\nArchive contents:\n" + "\n".join(sorted(names))
+        except zipfile.BadZipFile:
+            try:
+                content = (
+                    f"File: {path.name}\n"
+                    f"Size: {path.stat().st_size} bytes\n"
+                    "This file is not a ZIP-based .mnlgxdunit archive."
+                )
+            except OSError as exc:
+                messagebox.showerror("Manifest view failed", str(exc))
+                return
+        except OSError as exc:
+            messagebox.showerror("Manifest view failed", str(exc))
+            return
+        self.show_text_dialog(f"Manifest - {path.name}", content)
+
+    def show_about(self) -> None:
+        messagebox.showinfo(
+            "About minilogue xd Librarian",
+            "minilogue xd Librarian\n\n"
+            "Purpose:\n"
+            "Local librarian, SysEx, backup and diagnostic tool for Korg minilogue xd.\n\n"
+            "Supported formats:\n"
+            ".mnlgxdprog\n"
+            ".mnlgxdlib\n"
+            ".syx\n"
+            ".mnlgxdunit\n\n"
+            "Not an official Korg product.",
+        )
+
+    def open_log_folder(self) -> None:
+        """Open the folder containing the application log."""
+        folder = log_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+
+                subprocess.Popen(["open", str(folder)])
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.exception("Could not open log folder.")
+            messagebox.showerror(
+                "Could not open log folder",
+                f"Could not open log folder:\n{folder}\n\n{exc}",
+            )
+
+    def copy_diagnostic_report(self) -> None:
+        report = self.build_diagnostic_report()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(report)
+        self.append_log(log_line("Diagnostic report copied to clipboard."))
+        messagebox.showinfo("Diagnostic Report", "Diagnostic report copied to clipboard.")
+
+    def build_diagnostic_report(self) -> str:
+        try:
+            input_ports = get_input_ports()
+        except Exception as exc:
+            input_ports = [f"<error: {exc}>"]
+        try:
+            output_ports = get_output_ports()
+        except Exception as exc:
+            output_ports = [f"<error: {exc}>"]
+        return "\n".join(
+            [
+                "minilogue xd Librarian Diagnostic Report",
+                f"Version: unknown",
+                f"OS: {platform.platform()}",
+                f"Python: {platform.python_version()}",
+                f"Executable: {sys.executable}",
+                f"App data path: {user_data_dir()}",
+                f"Log file: {log_path()}",
+                f"Log level: {logging.getLevelName(logging.getLogger().getEffectiveLevel())}",
+                "Available MIDI IN ports:",
+                *(f"  - {port}" for port in input_ports),
+                "Available MIDI OUT ports:",
+                *(f"  - {port}" for port in output_ports),
+                f"Selected MIDI IN: {self.selected_input_port() or 'none'}",
+                f"Selected MIDI OUT: {self.selected_output_port() or 'none'}",
+                f"Last loaded bank: {self.loaded_source_path or 'unknown'}",
+                f"Unsaved changes: {'yes' if self.dirty else 'no'}",
+                f"Last error: {self.last_error or 'none'}",
+            ]
+        )
+
+    def midi_connection_test(self) -> None:
+        """Start a non-destructive MIDI connection test using the existing listener."""
+        self.start_receive_mode("test")
+
+    def start_receive_mode(self, mode: str) -> None:
+        labels = {
+            "single": "Receive Single Program",
+            "bank": "Receive Full Bank / All Programs",
+            "raw": "Raw SysEx Capture",
+            "test": "MIDI Connection Test",
+        }
+        self.receive_mode = mode
+        self.receive_mode_var.set(labels.get(mode, mode))
+        self.listen_for_sysex()
+        if mode == "bank":
+            self.append_log(
+                log_line(
+                    "Receive mode: Full Bank / All Programs. Existing SysEx capture logic is used; hardware verification required."
+                )
+            )
+        elif mode == "single":
+            self.append_log(log_line("Receive mode: Single Program. Waiting for one program SysEx dump."))
+        elif mode == "test":
+            self.append_log(log_line("MIDI Connection Test: waiting for non-destructive incoming SysEx."))
+        else:
+            self.append_log(log_line("Receive mode: Raw SysEx Capture."))
+
+    def mark_dirty(self, description: str) -> None:
+        self.dirty = True
+        if description:
+            self.change_log.append(description)
+            self.append_log(log_line(description))
+        self.update_window_title()
+
+    def clear_dirty_state(self) -> None:
+        self.dirty = False
+        self.update_window_title()
+
+    def update_window_title(self) -> None:
+        marker = " *" if self.dirty else ""
+        self.root.title(f"{self.app_title}{marker}")
+
+    def show_change_log(self) -> None:
+        if not self.change_log:
+            messagebox.showinfo("Change Log", "No bank changes recorded in this session.")
+            return
+        self.show_text_dialog("Change Log", "\n".join(self.change_log))
+
+    def show_text_dialog(self, title: str, content: str) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("720x480")
+        dialog.transient(self.root)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        text_widget = scrolledtext.ScrolledText(dialog, wrap=tk.WORD, font=("Consolas", 10))
+        text_widget.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        text_widget.insert("1.0", content)
+        text_widget.configure(state=tk.DISABLED)
+        ttk.Button(dialog, text="Close", command=dialog.destroy).grid(row=1, column=0, pady=(0, 8))
+
+
     def update_status(self) -> None:
         ports_open = "yes" if self.receiver.is_open else "no"
         self.status_var.set(
@@ -1439,9 +1700,8 @@ class MainWindow:
         self.settings["last_successful_sysex_received_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
         self.persist_settings()
 
-    def save_settings_from_tab(self) -> None:
-        self.settings["last_successful_midi_in"] = self.default_in_var.get()
-        self.settings["last_successful_midi_out"] = self.default_out_var.get()
+    def _collect_settings(self) -> None:
+        """Copy current GUI settings into the persisted settings dictionary."""
         self.settings["inactivity_ms"] = self.read_int(self.inactivity_ms_var.get(), 500)
         self.settings["max_timeout_s"] = self.read_int(self.max_timeout_s_var.get(), 10)
         self.settings["send_delay_ms"] = self.read_int(self.send_delay_var.get(), 80)
@@ -1449,6 +1709,11 @@ class MainWindow:
         self.settings["hide_midi_clock"] = self.hide_midi_clock_var.get()
         self.settings["show_realtime"] = self.show_realtime_var.get()
         self.settings["show_note_controller"] = self.show_note_controller_var.get()
+
+    def save_settings_from_tab(self) -> None:
+        self._collect_settings()
+        self.settings["last_successful_midi_in"] = self.default_in_var.get()
+        self.settings["last_successful_midi_out"] = self.default_out_var.get()
         self.persist_settings()
         self.update_status()
 
@@ -1484,15 +1749,15 @@ class MainWindow:
 
     def on_close(self) -> None:
         """Close MIDI resources, persist settings and destroy the root window."""
+        if self.dirty:
+            if not messagebox.askyesno(
+                "Unsaved changes",
+                "The current bank has unsaved changes. Close anyway?",
+            ):
+                return
+        self._collect_settings()
         self.settings["last_midi_in"] = self.selected_input_port()
         self.settings["last_midi_out"] = self.selected_output_port()
-        self.settings["inactivity_ms"] = self.read_int(self.inactivity_ms_var.get(), 500)
-        self.settings["max_timeout_s"] = self.read_int(self.max_timeout_s_var.get(), 10)
-        self.settings["send_delay_ms"] = self.read_int(self.send_delay_var.get(), 80)
-        self.settings["show_sysex_only"] = self.show_sysex_only_var.get()
-        self.settings["hide_midi_clock"] = self.hide_midi_clock_var.get()
-        self.settings["show_realtime"] = self.show_realtime_var.get()
-        self.settings["show_note_controller"] = self.show_note_controller_var.get()
         self.persist_settings()
         self.receiver.close_ports()
         self.root.destroy()

@@ -12,8 +12,9 @@ from app.app_paths import log_path
 from app.main_window import MainWindow
 
 
-WINDOW_TITLE = "minilogue xd Librarian - MIDI Test"
+WINDOW_TITLE = "minilogue xd Librarian"
 MIN_WINDOW_SIZE = (980, 680)
+DEFAULT_WINDOW_GEOMETRY = "1180x780"
 DEFAULT_LOG_LEVEL = logging.INFO
 
 
@@ -46,6 +47,7 @@ def _configured_log_level() -> int:
 def configure_root(root: tk.Tk) -> None:
     """Apply root window settings that belong to the app shell."""
     root.title(WINDOW_TITLE)
+    root.geometry(DEFAULT_WINDOW_GEOMETRY)
     root.minsize(*MIN_WINDOW_SIZE)
     icon_path = Path(__file__).resolve().parent / "assets" / "icon.ico"
     if icon_path.exists():
