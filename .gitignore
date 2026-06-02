@@ -19,6 +19,8 @@ minilogue_xd_format_layer_codex_auftrag.md
 libraries/
 
 dumps/*.syx
+dumps/*.json
+dumps/*.txt
 !dumps/.gitkeep
 
 .DS_Store
