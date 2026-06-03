@@ -5,8 +5,14 @@ import zipfile
 from pathlib import Path
 
 from xd_formats import (
+    XDProgram,
+    decode_current_program_dump,
+    encode_current_program_dump,
+    encode_program_dump,
     export_programs_as_mnlgxdprog,
+    import_current_program_from_bytes,
     import_sysex_programs,
+    import_sysex_programs_from_bytes,
     load_mnlgxdlib,
     load_mnlgxdprog,
     load_mnlgxdunit,
@@ -17,9 +23,17 @@ from xd_formats import (
     write_program_name,
     write_sysex_programs,
 )
+from xd_formats.sysex_codec import encode_7bit_packed
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "libraries"
+
+
+def make_prog_bin(name: str) -> bytes:
+    data = bytearray(1024)
+    data[:4] = b"PROG"
+    data[4:16] = name.encode("latin-1")[:12].ljust(12, b" ")
+    return bytes(data)
 
 
 class XDFormatTest(unittest.TestCase):
@@ -76,6 +90,72 @@ class XDFormatTest(unittest.TestCase):
         self.assertEqual(read_program_name(renamed), "ABCDEFGHIJKL")
         self.assertEqual(renamed[:4], program.prog_bin[:4])
         self.assertEqual(renamed[16:], program.prog_bin[16:])
+
+    def test_load_program_zip_without_file_information(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "single.mnlgxdprog"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("Prog_000.prog_bin", make_prog_bin("4Voice NK"))
+
+            program = load_mnlgxdprog(path)
+
+            self.assertEqual(program.name, "4Voice NK")
+            self.assertEqual(program.prog_bin[:4], b"PROG")
+
+    def test_load_library_zip_falls_back_to_sorted_prog_bins(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "library.mnlgxdlib"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("Prog_002.prog_bin", make_prog_bin("Third"))
+                archive.writestr("Prog_000.prog_bin", make_prog_bin("First"))
+                archive.writestr("Prog_001.prog_bin", make_prog_bin("Second"))
+                archive.writestr("FileInformation.xml", b"not xml")
+
+            library = load_mnlgxdlib(path)
+
+            self.assertEqual([program.name for program in library.programs], ["First", "Second", "Third"])
+
+
+class LiveSysexImportTest(unittest.TestCase):
+    @staticmethod
+    def make_program(name: str = "LiveName") -> XDProgram:
+        prog_bin = bytearray(1024)
+        prog_bin[:4] = b"PROG"
+        prog_bin[4:16] = name.encode("latin-1")[:12].ljust(12, b" ")
+        return XDProgram(slot_index=1, name=name, prog_bin=bytes(prog_bin), source_type="test")
+
+    def test_import_sysex_programs_from_bytes_ignores_non_program_commands(self):
+        program = self.make_program("SlotTwo")
+        slot_dump = encode_program_dump(program, 1)
+        raw = bytes.fromhex("F0 42 30 00 01 51 44 F7") + slot_dump + bytes.fromhex("F0 42 30 00 01 51 51 F7")
+
+        programs = import_sysex_programs_from_bytes(raw)
+
+        self.assertEqual(len(programs), 1)
+        self.assertEqual(programs[0].slot_index, 1)
+        self.assertEqual(programs[0].name, "SlotTwo")
+
+    def test_import_current_program_from_bytes(self):
+        program = self.make_program("Current")
+        current_dump = bytes.fromhex("F0 42 30 00 01 51 40") + encode_7bit_packed(program.prog_bin) + b"\xF7"
+
+        decoded = import_current_program_from_bytes(current_dump)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.name, "Current")
+        self.assertIsNone(decoded.slot_index)
+
+    def test_encode_current_program_dump_has_no_slot_bytes(self):
+        program = self.make_program("Buffer")
+
+        current_dump = encode_current_program_dump(program)
+        decoded = decode_current_program_dump(current_dump)
+
+        self.assertEqual(current_dump[6], 0x40)
+        self.assertEqual(current_dump[7:12], bytes.fromhex("00 50 52 4F 47"))
+        self.assertEqual(len(current_dump), 1179)
+        self.assertEqual(decoded.name, "Buffer")
+        self.assertIsNone(decoded.slot_index)
 
 
 class XDUnitFormatTest(unittest.TestCase):

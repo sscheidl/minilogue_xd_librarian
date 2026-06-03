@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+STATUS_EMPTY = "empty"
+STATUS_SYNCED = "Synced"
+STATUS_IMPORTED = "Imported"
+STATUS_MODIFIED = "Modified in editor"
+STATUS_SENT = "Sent to XD"
+STATUS_ERROR = "Error"
+
+
 @dataclass
 class SysexRecord:
     index: int
@@ -42,7 +50,7 @@ class BankSlot:
     raw: bytes = b""
     prog_bin: bytes = b""
     sha256: str = ""
-    status: str = "empty"
+    status: str = STATUS_EMPTY
     notes: str = ""
 
     @property

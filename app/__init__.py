@@ -1,1 +1,1 @@
-"""GUI package for the minilogue xd librarian prototype."""
+"""Application package for the minilogue xd Librarian."""

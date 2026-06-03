@@ -1,0 +1,696 @@
+{
+  "profile_id": "korg_minilogue_xd",
+  "display_name": "Korg Minilogue XD",
+  "manufacturer": "Korg",
+  "device": "Minilogue XD",
+  "midi_channel_base": 1,
+  "notes": "Based on the official KORG minilogue xd MIDI Implementation Revision 1.01 (2020-02-10). CC #63 is used as a lower-bit helper for several higher-resolution parameters.",
+  "event_names": {
+    "active_sensing": "Active Sensing",
+    "aftertouch": "Channel Pressure",
+    "clock": "Clock",
+    "continue": "Continue",
+    "control_change": "Control Change",
+    "note_off": "Note Off",
+    "note_on": "Note On",
+    "pitchwheel": "Pitch Bend",
+    "polytouch": "Poly Aftertouch",
+    "program_change": "Program Change",
+    "reset": "System Reset",
+    "start": "Start",
+    "stop": "Stop",
+    "sysex": "SysEx Summary"
+  },
+  "program_mapping": {
+    "program_count": 500,
+    "display_base": 1,
+    "uses_bank_select": true,
+    "bank_select": {
+      "msb_cc": 0,
+      "lsb_cc": 32
+    },
+    "banks": [
+      {
+        "name": "A",
+        "bank_msb": 0,
+        "bank_lsb": 0,
+        "start_program": 1,
+        "end_program": 100
+      },
+      {
+        "name": "B",
+        "bank_msb": 0,
+        "bank_lsb": 1,
+        "start_program": 101,
+        "end_program": 200
+      },
+      {
+        "name": "C",
+        "bank_msb": 0,
+        "bank_lsb": 2,
+        "start_program": 201,
+        "end_program": 300
+      },
+      {
+        "name": "D",
+        "bank_msb": 0,
+        "bank_lsb": 3,
+        "start_program": 301,
+        "end_program": 400
+      },
+      {
+        "name": "E",
+        "bank_msb": 0,
+        "bank_lsb": 4,
+        "start_program": 401,
+        "end_program": 500
+      }
+    ]
+  },
+  "control_changes": {
+    "0": {
+      "name": "Bank Select (MSB)",
+      "group": "MIDI",
+      "type": "selection",
+      "min": 0,
+      "max": 0
+    },
+    "1": {
+      "name": "Joystick +Y",
+      "group": "Joystick",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "2": {
+      "name": "Joystick -Y",
+      "group": "Joystick",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "5": {
+      "name": "Portamento Time",
+      "group": "Voice",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "16": {
+      "name": "Amp EG Attack",
+      "group": "Amp EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "17": {
+      "name": "Amp EG Decay",
+      "group": "Amp EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "18": {
+      "name": "Amp EG Sustain",
+      "group": "Amp EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "19": {
+      "name": "Amp EG Release",
+      "group": "Amp EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "20": {
+      "name": "EG Attack",
+      "group": "EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "21": {
+      "name": "EG Decay",
+      "group": "EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "22": {
+      "name": "EG Intensity",
+      "group": "EG",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "23": {
+      "name": "EG Target",
+      "group": "EG",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Cutoff" },
+        { "value": 64, "label": "Pitch 2" },
+        { "value": 127, "label": "Pitch" }
+      ]
+    },
+    "24": {
+      "name": "LFO Rate",
+      "group": "LFO",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "26": {
+      "name": "LFO Intensity",
+      "group": "LFO",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "27": {
+      "name": "Voice Mode Depth",
+      "group": "Voice",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "28": {
+      "name": "Mod FX Time",
+      "group": "Mod FX",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "29": {
+      "name": "Mod FX Depth",
+      "group": "Mod FX",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "32": {
+      "name": "Bank Select (LSB)",
+      "group": "MIDI",
+      "type": "selection",
+      "min": 0,
+      "max": 4
+    },
+    "33": {
+      "name": "Multi Level",
+      "group": "Multi Engine",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "34": {
+      "name": "VCO 1 Pitch",
+      "group": "VCO 1",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "35": {
+      "name": "VCO 2 Pitch",
+      "group": "VCO 2",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "36": {
+      "name": "VCO 1 Shape",
+      "group": "VCO 1",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "37": {
+      "name": "VCO 2 Shape",
+      "group": "VCO 2",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "39": {
+      "name": "VCO 1 Level",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "40": {
+      "name": "VCO 2 Level",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "41": {
+      "name": "Cross Mod Depth",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "43": {
+      "name": "Filter Cutoff",
+      "group": "Filter",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "44": {
+      "name": "Filter Resonance",
+      "group": "Filter",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "48": {
+      "name": "VCO 1 Octave",
+      "group": "VCO 1",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "16'" },
+        { "value": 42, "label": "8'" },
+        { "value": 84, "label": "4'" },
+        { "value": 127, "label": "2'" }
+      ]
+    },
+    "49": {
+      "name": "VCO 2 Octave",
+      "group": "VCO 2",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "16'" },
+        { "value": 42, "label": "8'" },
+        { "value": 84, "label": "4'" },
+        { "value": 127, "label": "2'" }
+      ]
+    },
+    "50": {
+      "name": "VCO 1 Wave",
+      "group": "VCO 1",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Square" },
+        { "value": 64, "label": "Triangle" },
+        { "value": 127, "label": "Saw" }
+      ]
+    },
+    "51": {
+      "name": "VCO 2 Wave",
+      "group": "VCO 2",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Square" },
+        { "value": 64, "label": "Triangle" },
+        { "value": 127, "label": "Saw" }
+      ]
+    },
+    "53": {
+      "name": "Multi Type",
+      "group": "Multi Engine",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Noise" },
+        { "value": 64, "label": "VPM" },
+        { "value": 127, "label": "User" }
+      ]
+    },
+    "54": {
+      "name": "Multi Shape",
+      "group": "Multi Engine",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "56": {
+      "name": "LFO Target",
+      "group": "LFO",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Cutoff" },
+        { "value": 64, "label": "Shape" },
+        { "value": 127, "label": "Pitch" }
+      ]
+    },
+    "57": {
+      "name": "LFO Wave",
+      "group": "LFO",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Square" },
+        { "value": 64, "label": "Triangle" },
+        { "value": 127, "label": "Saw" }
+      ]
+    },
+    "58": {
+      "name": "LFO Mode",
+      "group": "LFO",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "1-Shot" },
+        { "value": 64, "label": "Normal" },
+        { "value": 127, "label": "BPM" }
+      ]
+    },
+    "59": {
+      "name": "Voice Mode Depth (No Display)",
+      "group": "Voice",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Official MIDI implementation marks this as 'no display'."
+    },
+    "64": {
+      "name": "Hold",
+      "group": "Voice",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "80": {
+      "name": "Sync",
+      "group": "Oscillator",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "81": {
+      "name": "Ring",
+      "group": "Oscillator",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "83": {
+      "name": "Filter Keytrack",
+      "group": "Filter",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "0%" },
+        { "value": 64, "label": "50%" },
+        { "value": 127, "label": "100%" }
+      ]
+    },
+    "84": {
+      "name": "Filter Drive",
+      "group": "Filter",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "0%" },
+        { "value": 64, "label": "50%" },
+        { "value": 127, "label": "100%" }
+      ]
+    },
+    "88": {
+      "name": "Mod FX Type",
+      "group": "Mod FX",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Chorus" },
+        { "value": 38, "label": "Ensemble" },
+        { "value": 64, "label": "Phaser" },
+        { "value": 84, "label": "Flanger" },
+        { "value": 127, "label": "User" }
+      ]
+    },
+    "89": {
+      "name": "Delay Sub Type",
+      "group": "Delay",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Stereo" },
+        { "value": 7, "label": "Mono" },
+        { "value": 13, "label": "Ping Pong" },
+        { "value": 20, "label": "Hi Pass" },
+        { "value": 26, "label": "Tape" },
+        { "value": 32, "label": "One Tap" },
+        { "value": 39, "label": "Stereo BPM" },
+        { "value": 45, "label": "Mono BPM" },
+        { "value": 52, "label": "Ping BPM" },
+        { "value": 58, "label": "Hi Pass BPM" },
+        { "value": 64, "label": "Tape BPM" },
+        { "value": 71, "label": "Doubling" },
+        { "value": 77, "label": "User 1" },
+        { "value": 84, "label": "User 2" },
+        { "value": 90, "label": "User 3" },
+        { "value": 96, "label": "User 4" },
+        { "value": 103, "label": "User 5" },
+        { "value": 109, "label": "User 6" },
+        { "value": 116, "label": "User 7" },
+        { "value": 127, "label": "User 8" }
+      ]
+    },
+    "90": {
+      "name": "Reverb Sub Type",
+      "group": "Reverb",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "value": 0, "label": "Hall" },
+        { "value": 8, "label": "Smooth" },
+        { "value": 15, "label": "Arena" },
+        { "value": 22, "label": "Plate" },
+        { "value": 29, "label": "Room" },
+        { "value": 36, "label": "Early Ref" },
+        { "value": 43, "label": "Space" },
+        { "value": 50, "label": "Riser" },
+        { "value": 57, "label": "Submarine" },
+        { "value": 64, "label": "Horror" },
+        { "value": 72, "label": "User 1" },
+        { "value": 79, "label": "User 2" },
+        { "value": 86, "label": "User 3" },
+        { "value": 93, "label": "User 4" },
+        { "value": 100, "label": "User 5" },
+        { "value": 107, "label": "User 6" },
+        { "value": 117, "label": "User 7" },
+        { "value": 127, "label": "User 8" }
+      ]
+    },
+    "92": {
+      "name": "Mod FX On/Off",
+      "group": "Mod FX",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "93": {
+      "name": "Delay On/Off",
+      "group": "Delay",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "94": {
+      "name": "Reverb On/Off",
+      "group": "Reverb",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "96": {
+      "name": "Mod FX Sub Type",
+      "group": "Mod FX",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "notes": "Subtype labels depend on the current Mod FX Type in the official MIDI implementation."
+    },
+    "103": {
+      "name": "Multi Sub Type Select",
+      "group": "Multi Engine",
+      "type": "selection",
+      "min": 0,
+      "max": 127,
+      "notes": "Subtype labels depend on the current Multi Type in the official MIDI implementation."
+    },
+    "104": {
+      "name": "Multi Shift Shape",
+      "group": "Multi Engine",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "105": {
+      "name": "Delay Time",
+      "group": "Delay",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "106": {
+      "name": "Delay Depth",
+      "group": "Delay",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "107": {
+      "name": "Delay Dry/Wet",
+      "group": "Delay",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "108": {
+      "name": "Reverb Time",
+      "group": "Reverb",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "109": {
+      "name": "Reverb Depth",
+      "group": "Reverb",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "110": {
+      "name": "Reverb Dry/Wet",
+      "group": "Reverb",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "10-bit capable parameter; CC63 carries lower bits first."
+    },
+    "118": {
+      "name": "CV In 1",
+      "group": "CV",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Only transmitted in modulation mode and not via USB MIDI."
+    },
+    "119": {
+      "name": "CV In 2",
+      "group": "CV",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Only transmitted in modulation mode and not via USB MIDI."
+    }
+  },
+  "special_controls": {
+    "6": {
+      "name": "Data Entry (MSB)",
+      "group": "Technical",
+      "type": "helper",
+      "min": 0,
+      "max": 127,
+      "show_in_simple_view": false,
+      "show_in_technical_view": true,
+      "notes": "Used with NRPN and higher-resolution parameter editing."
+    },
+    "63": {
+      "name": "CC63 Helper / Lower Bits",
+      "group": "Technical",
+      "type": "helper",
+      "min": 0,
+      "max": 127,
+      "show_in_simple_view": false,
+      "show_in_technical_view": true,
+      "notes": "Lower bits for 10-bit or 8-bit values are sent first on CC63 in the official MIDI implementation."
+    },
+    "98": {
+      "name": "NRPN LSB",
+      "group": "Technical",
+      "type": "helper",
+      "min": 0,
+      "max": 127,
+      "show_in_simple_view": false,
+      "show_in_technical_view": true
+    },
+    "99": {
+      "name": "NRPN MSB",
+      "group": "Technical",
+      "type": "helper",
+      "min": 0,
+      "max": 127,
+      "show_in_simple_view": false,
+      "show_in_technical_view": true
+    }
+  }
+}

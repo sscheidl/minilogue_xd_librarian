@@ -31,5 +31,7 @@ UNIT_MODULE_LABELS = {
 
 KNOWN_UNIT_SIGNATURES = {
     "UOSC": "osc",
+    "UMOD": "modfx",
+    "UDEL": "delfx",
     "UREV": "revfx",
 }

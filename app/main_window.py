@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
+import mido
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, scrolledtext, ttk
@@ -48,6 +52,7 @@ from librarian.sysex_tools import (
 from librarian.import_validation import COMPATIBLE, PROBABLY_COMPATIBLE, validate_import_path
 from librarian.user_units import (
     UserUnitAssignment,
+    UserUnitFile,
     first_available_slot_key,
     import_user_unit,
     load_user_unit_assignments,
@@ -65,6 +70,7 @@ from midi.filters import (
     should_log_message,
 )
 from midi.ports import get_input_ports, get_output_ports
+from midi.profiles import MidiProfile, load_midi_profiles
 from midi.receiver import MidiReceiver, QueuedMidiError, QueuedMidiMessage
 from midi.sysex_requests import request_current_program, request_program_slot
 from midi.sysex_buffer import SysexBuffer
@@ -100,6 +106,43 @@ _BANK_COLUMN_WIDTHS = {
     "source": 240,
     "status": 180,
 }
+_STARTUP_XD_WARNING_DELAY_MS = 3000
+_STARTUP_MONITOR_RETRY_DELAY_MS = 1200
+_CAPTURED_DUMP_SOURCE = "Captured SysEx dump"
+_EDIT_TAB_TITLE = "Edit"
+_MIDI_MONITOR_TAB_TITLE = "MIDI Monitor"
+_MIDI_MONITOR_FLUSH_MS = 100
+_MIDI_MONITOR_MAX_LINES = 1000
+_NO_MIDI_OUT_MESSAGE = (
+    "No MIDI OUT port is open. Open a MIDI OUT port in the Transfer tab before sending data to the Minilogue XD."
+)
+_NO_AUDITION_MIDI_OUT_MESSAGE = (
+    "No MIDI OUT port is open. Open a MIDI OUT port before using Play Preset."
+)
+_INLINE_RENAME_DELAY_MS = 220
+_MONITOR_NOTE_TYPES = {"note_on", "note_off"}
+_MONITOR_AFTERTOUCH_TYPES = {"aftertouch", "polytouch"}
+_AUDITION_BUFFER_SETTLE_MS = 150
+_AUDITION_NOTES = (36, 48, 55, 60, 64, 67, 72)
+_AUDITION_VELOCITY = 96
+_AUDITION_NOTE_LENGTH_MS = 250
+_AUDITION_GAP_MS = 60
+
+
+@dataclass(frozen=True)
+class MidiMonitorEntry:
+    timestamp: str
+    direction: str
+    message_type: str
+    channel: int | None
+    parameter: str
+    cc: int | None
+    value: int | None
+    value_label: str
+    raw_hex: str
+    profile_id: str
+    line: str
+    tag: str
 
 
 def _asset_path(filename: str) -> Path:
@@ -157,6 +200,7 @@ class MainWindow:
         self.native_capture_status = detect_engine3_native_runtime()
         self.sysex_buffer = SysexBuffer()
         self.settings = load_settings()
+        self.midi_profiles, self.midi_profile_warnings = load_midi_profiles()
 
         empty_info = MidiMessageInfo("none", 0, False, False, False, None, False)
         self.last_midi_info = empty_info
@@ -201,6 +245,32 @@ class MainWindow:
         self.logo_image: tk.PhotoImage | None = None
         self.user_unit_assignment_path = user_data_dir() / "user_unit_slots.json"
         self.user_unit_assignments = load_user_unit_assignments(self.user_unit_assignment_path)
+        self.startup_port_detection_running = False
+        self.startup_port_detection_completed = False
+        self.xd_detected_last_scan = False
+        self.missing_xd_warning_shown = False
+        self.missing_xd_warning_pending = False
+        self.last_captured_sysex_bytes = b""
+        self.last_captured_dump_kind = "none"
+        self.last_captured_export_formats: tuple[str, ...] = ()
+        self.pending_inline_rename_job: str | None = None
+        self.inline_name_editor: ttk.Entry | None = None
+        self.inline_name_editor_item: str | None = None
+        self.inline_name_editor_index: int | None = None
+        self.inline_name_editor_original = ""
+        self.play_preset_buttons: list[ttk.Button] = []
+        self.audition_running = False
+        self.midi_profile_combo: ttk.Combobox | None = None
+        self.midi_profile_menu: tk.Menu | None = None
+        self.midi_monitor_text: scrolledtext.ScrolledText | None = None
+        self.midi_profile_display_to_id: dict[str, str] = {}
+        self.midi_monitor_pending_lines: list[tuple[str, str]] = []
+        self.midi_monitor_flush_pending = False
+        self.midi_monitor_visible_messages = 0
+        self.midi_monitor_hidden_messages = 0
+        self.midi_monitor_entries: list[MidiMonitorEntry] = []
+        self.monitor_cc_state: dict[int, dict[int, int]] = {}
+        self.monitor_program_state: dict[int, dict[str, int]] = {}
 
         self.input_port_var = tk.StringVar()
         self.output_port_var = tk.StringVar()
@@ -223,11 +293,36 @@ class MainWindow:
         self.colorize_log_var = tk.BooleanVar(value=self.settings.get("colorize_log", True))
         self.debug_logging_var = tk.BooleanVar(value=self.settings.get("debug_logging", False))
         self.show_details_var = tk.BooleanVar(value=self.settings.get("show_details", False))
+        self.case_sensitive_search_var = tk.BooleanVar(
+            value=self.settings.get("case_sensitive_search", False)
+        )
+        self.monitor_show_notes_var = tk.BooleanVar(value=True)
+        self.monitor_show_control_change_var = tk.BooleanVar(value=True)
+        self.monitor_show_program_change_var = tk.BooleanVar(value=True)
+        self.monitor_show_pitch_bend_var = tk.BooleanVar(value=True)
+        self.monitor_show_aftertouch_var = tk.BooleanVar(value=True)
+        self.monitor_show_realtime_var = tk.BooleanVar(value=False)
+        self.monitor_show_active_sensing_var = tk.BooleanVar(value=False)
+        self.monitor_show_sysex_var = tk.BooleanVar(value=True)
+        self.monitor_show_other_var = tk.BooleanVar(value=True)
+        self.monitor_show_technical_var = tk.BooleanVar(
+            value=self.settings.get("monitor_show_technical", False)
+        )
+        self.monitor_hide_cc63_var = tk.BooleanVar(
+            value=self.settings.get("monitor_hide_cc63", True)
+        )
+        self.monitor_enabled_var = tk.BooleanVar(
+            value=self.settings.get("monitor_enabled", True)
+        )
         self.auto_detect_korg_var = tk.BooleanVar(value=True)
         self.inactivity_ms_var = tk.StringVar(value=str(self.settings.get("inactivity_ms", 500)))
         self.max_timeout_s_var = tk.StringVar(value=str(self.settings.get("max_timeout_s", 10)))
         self.ack_timeout_s_var = tk.StringVar(value=str(self.settings.get("ack_timeout_s", 3)))
         self.send_delay_var = tk.StringVar(value=str(self.settings.get("send_delay_ms", 80)))
+        self.midi_profile_var = tk.StringVar(
+            value=self.settings.get("midi_monitor_profile_id", "korg_minilogue_xd")
+        )
+        self.monitor_toggle_text_var = tk.StringVar()
         self.status_var = tk.StringVar()
         self.sysex_summary_var = tk.StringVar()
         self.port_hint_var = tk.StringVar()
@@ -238,8 +333,11 @@ class MainWindow:
         self.bank_count_var = tk.StringVar(value="500 / 500 shown")
         self.user_osc_status_var = tk.StringVar()
         self.user_fx_status_var = tk.StringVar()
+        self.midi_monitor_status_var = tk.StringVar(value="Monitor: 0 shown, 0 hidden by filters")
+        self.monitor_connection_retry_pending = False
 
         self._build_layout()
+        self.initialize_midi_profiles()
         self.initialize_midi_connection()
         self.refresh_bank_tree()
         self.refresh_user_units_trees()
@@ -265,17 +363,106 @@ class MainWindow:
         self.append_log(log_line(f"minilogue xd Librarian v{_APP_VERSION} started"))
         self.native_capture_status = detect_engine3_native_runtime()
         self.append_log(log_line(self.native_capture_status.status_text))
-        self.refresh_ports()
         if not self.native_capture_status.available:
             self.listen_status_var.set(self.native_capture_status.status_text)
-        if self.auto_connect_var.get() and (self.selected_input_port() or self.selected_output_port()):
-            self.open_ports()
-            if self.receiver.is_open:
-                self.append_log(log_line("MIDI auto-connect completed. No data was sent."))
-            else:
-                self.listen_status_var.set("MIDI: not connected - use Reconnect MIDI")
         else:
-            self.listen_status_var.set("MIDI: not connected - use Reconnect MIDI")
+            self.listen_status_var.set("Scanning MIDI ports for minilogue xd...")
+        self.start_background_port_detection()
+
+    def initialize_midi_profiles(self) -> None:
+        self.midi_profile_display_to_id = {
+            profile.display_name: profile_id
+            for profile_id, profile in sorted(
+                self.midi_profiles.items(),
+                key=lambda item: item[1].display_name.lower(),
+            )
+        }
+        if self.midi_profile_combo is not None:
+            self.midi_profile_combo["values"] = list(self.midi_profile_display_to_id.keys())
+
+        selected_profile = self.settings.get("midi_monitor_profile_id", self.midi_profile_var.get())
+        self.select_midi_profile(selected_profile, log_fallback=False)
+        self.update_monitor_toggle_text()
+        self.update_midi_monitor_status()
+
+        for warning in self.midi_profile_warnings:
+            self.append_log(log_line(f"WARNING: {warning}"))
+
+    def select_midi_profile(self, profile_id: str | None, *, log_fallback: bool = True) -> None:
+        requested_profile = profile_id or "korg_minilogue_xd"
+        if requested_profile not in self.midi_profiles:
+            fallback_profile = "generic_midi"
+            if "korg_minilogue_xd" in self.midi_profiles:
+                fallback_profile = "korg_minilogue_xd"
+            if log_fallback:
+                self.append_log(
+                    log_line(
+                        f"WARNING: Could not load MIDI profile '{requested_profile}'. Falling back to {self.midi_profiles[fallback_profile].display_name}."
+                    )
+                )
+            requested_profile = fallback_profile
+
+        profile = self.midi_profiles[requested_profile]
+        self.midi_profile_var.set(profile.display_name)
+        self.settings["midi_monitor_profile_id"] = requested_profile
+        if self.midi_profile_combo is not None:
+            self.midi_profile_combo.set(profile.display_name)
+        self.update_midi_monitor_status()
+
+    def on_midi_profile_selected(self, _event: tk.Event | None = None) -> None:
+        display_name = self.midi_profile_var.get()
+        profile_id = self.midi_profile_display_to_id.get(display_name)
+        if profile_id is None:
+            self.select_midi_profile("generic_midi")
+            return
+        self.select_midi_profile(profile_id)
+
+    def current_midi_profile(self) -> MidiProfile:
+        display_name = self.midi_profile_var.get()
+        profile_id = self.midi_profile_display_to_id.get(display_name)
+        if profile_id and profile_id in self.midi_profiles:
+            return self.midi_profiles[profile_id]
+        if "korg_minilogue_xd" in self.midi_profiles:
+            return self.midi_profiles["korg_minilogue_xd"]
+        return self.midi_profiles["generic_midi"]
+
+    def update_monitor_toggle_text(self) -> None:
+        if self.monitor_enabled_var.get():
+            self.monitor_toggle_text_var.set("Stop Monitoring")
+        else:
+            self.monitor_toggle_text_var.set("Start Monitoring")
+
+    def toggle_midi_monitoring(self) -> None:
+        self.monitor_enabled_var.set(not self.monitor_enabled_var.get())
+        if self.monitor_enabled_var.get() and not self.receiver.is_open:
+            self.ensure_monitor_ports_open()
+        self.update_monitor_toggle_text()
+        self.update_midi_monitor_status()
+
+    def ensure_monitor_ports_open(self, *, retry_on_failure: bool = False) -> None:
+        if not self.monitor_enabled_var.get() or self.receiver.is_open:
+            return
+        if self.selected_input_port() is None and self.selected_output_port() is None:
+            return
+        self.open_ports()
+        if not self.receiver.is_open and retry_on_failure:
+            self.schedule_monitor_connection_retry()
+
+    def schedule_monitor_connection_retry(self) -> None:
+        if self.monitor_connection_retry_pending or self._closing:
+            return
+        self.monitor_connection_retry_pending = True
+        self.schedule_after(_STARTUP_MONITOR_RETRY_DELAY_MS, self.retry_monitor_connection_if_needed)
+
+    def retry_monitor_connection_if_needed(self) -> None:
+        self.monitor_connection_retry_pending = False
+        if not self.monitor_enabled_var.get() or self.receiver.is_open:
+            return
+        if not self.auto_connect_var.get():
+            return
+        if self.selected_input_port() is None and self.selected_output_port() is None:
+            return
+        self.open_ports()
 
     def initialize_ports_without_scan(self) -> None:
         """Backward-compatible alias for older tests and launchers."""
@@ -298,6 +485,8 @@ class MainWindow:
         if event.widget is not self.root:
             return
         self._closing = True
+        self.cancel_pending_inline_bank_rename()
+        self.destroy_inline_bank_editor()
         for job_id in tuple(self._after_jobs):
             try:
                 self.root.after_cancel(job_id)
@@ -317,18 +506,21 @@ class MainWindow:
 
         self.banks_tab = ttk.Frame(self.tabs, padding=10)
         self.midi_tab = ttk.Frame(self.tabs, padding=10)
+        self.midi_monitor_tab = ttk.Frame(self.tabs, padding=10)
         self.user_osc_tab = ttk.Frame(self.tabs, padding=10)
         self.user_fx_tab = ttk.Frame(self.tabs, padding=10)
         self.settings_tab = ttk.Frame(self.tabs, padding=10)
 
-        self.tabs.add(self.banks_tab, text="Programs / Banks")
+        self.tabs.add(self.banks_tab, text=_EDIT_TAB_TITLE)
         self.tabs.add(self.midi_tab, text="Transfer")
+        self.tabs.add(self.midi_monitor_tab, text=_MIDI_MONITOR_TAB_TITLE)
         self.tabs.add(self.user_osc_tab, text="User OSC")
         self.tabs.add(self.user_fx_tab, text="User FX")
         self.tabs.add(self.settings_tab, text="Options")
 
         self._build_banks_tab()
         self._build_midi_tab()
+        self._build_midi_monitor_tab()
         self._build_user_unit_placeholder_tab(self.user_osc_tab, "User OSC")
         self._build_user_unit_placeholder_tab(self.user_fx_tab, "User FX")
         self._build_settings_tab()
@@ -458,6 +650,127 @@ class MainWindow:
         self.log_text.tag_configure("error", foreground="#cf222e")
         self.log_text.tag_configure("debug", foreground="#6e7781")
 
+    def _build_midi_monitor_tab(self) -> None:
+        self.midi_monitor_tab.columnconfigure(0, weight=1)
+        self.midi_monitor_tab.rowconfigure(3, weight=1)
+
+        profile_bar = ttk.LabelFrame(self.midi_monitor_tab, text="Monitor")
+        profile_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for column in range(10):
+            profile_bar.columnconfigure(column, weight=1 if column in {1, 9} else 0)
+
+        ttk.Label(profile_bar, text="MIDI Profile").grid(row=0, column=0, sticky="w", padx=(8, 6), pady=6)
+        self.midi_profile_combo = ttk.Combobox(
+            profile_bar,
+            textvariable=self.midi_profile_var,
+            state="readonly",
+            width=24,
+        )
+        self.midi_profile_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=6)
+        self.midi_profile_combo.bind("<<ComboboxSelected>>", self.on_midi_profile_selected)
+
+        ttk.Checkbutton(
+            profile_bar,
+            text="Show technical details",
+            variable=self.monitor_show_technical_var,
+        ).grid(row=0, column=2, sticky="w", padx=8, pady=6)
+        ttk.Checkbutton(
+            profile_bar,
+            text="Hide CC63 helper messages",
+            variable=self.monitor_hide_cc63_var,
+        ).grid(row=0, column=3, sticky="w", padx=8, pady=6)
+        ttk.Button(
+            profile_bar,
+            textvariable=self.monitor_toggle_text_var,
+            command=self.toggle_midi_monitoring,
+        ).grid(row=0, column=4, sticky="ew", padx=5, pady=6)
+        ttk.Button(
+            profile_bar,
+            text="Clear Monitor",
+            command=self.clear_midi_monitor,
+        ).grid(row=0, column=5, sticky="ew", padx=5, pady=6)
+        ttk.Button(
+            profile_bar,
+            text="Copy to Clipboard",
+            command=self.copy_midi_monitor_to_clipboard,
+        ).grid(row=0, column=6, sticky="ew", padx=5, pady=6)
+        ttk.Button(
+            profile_bar,
+            text="Export .txt",
+            command=self.export_midi_monitor_txt,
+        ).grid(row=0, column=7, sticky="ew", padx=5, pady=6)
+        ttk.Button(
+            profile_bar,
+            text="Export .csv",
+            command=self.export_midi_monitor_csv,
+        ).grid(row=0, column=8, sticky="ew", padx=5, pady=6)
+
+        filters = ttk.LabelFrame(self.midi_monitor_tab, text="Monitor Filters")
+        filters.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        for column in range(5):
+            filters.columnconfigure(column, weight=1)
+
+        filter_specs = [
+            ("Notes", self.monitor_show_notes_var),
+            ("Control Change", self.monitor_show_control_change_var),
+            ("Program Change", self.monitor_show_program_change_var),
+            ("Pitch Bend", self.monitor_show_pitch_bend_var),
+            ("Aftertouch", self.monitor_show_aftertouch_var),
+            ("Realtime (Clock/Start/Stop)", self.monitor_show_realtime_var),
+            ("Active Sensing", self.monitor_show_active_sensing_var),
+            ("SysEx summaries", self.monitor_show_sysex_var),
+            ("Other MIDI", self.monitor_show_other_var),
+        ]
+        for index, (text, variable) in enumerate(filter_specs):
+            ttk.Checkbutton(filters, text=text, variable=variable).grid(
+                row=index // 5,
+                column=index % 5,
+                sticky="w",
+                padx=8,
+                pady=5,
+            )
+
+        ttk.Label(self.midi_monitor_tab, textvariable=self.midi_monitor_status_var).grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            pady=(0, 8),
+        )
+
+        self.midi_monitor_text = scrolledtext.ScrolledText(
+            self.midi_monitor_tab,
+            wrap=tk.NONE,
+            font=("Consolas", 10),
+        )
+        self.midi_monitor_text.grid(row=3, column=0, sticky="nsew")
+        self.midi_monitor_text.bind("<Button-3>", self.show_midi_monitor_context_menu)
+        self.configure_midi_monitor_tags()
+        self.build_midi_monitor_context_menu()
+
+    def configure_midi_monitor_tags(self) -> None:
+        if self.midi_monitor_text is None:
+            return
+        self.midi_monitor_text.tag_configure("channel", foreground="#0969da")
+        self.midi_monitor_text.tag_configure("realtime", foreground="#9a6700")
+        self.midi_monitor_text.tag_configure("sysex", foreground="#6f42c1")
+        self.midi_monitor_text.tag_configure("other", foreground="#57606a")
+
+    def build_midi_monitor_context_menu(self) -> None:
+        self.midi_profile_menu = tk.Menu(self.root, tearoff=False)
+        self.midi_profile_menu.add_command(
+            label="Copy Selection",
+            command=lambda: self.copy_midi_monitor_to_clipboard(selection_only=True),
+        )
+        self.midi_profile_menu.add_command(
+            label="Copy All",
+            command=self.copy_midi_monitor_to_clipboard,
+        )
+        self.midi_profile_menu.add_separator()
+        self.midi_profile_menu.add_command(label="Clear Monitor", command=self.clear_midi_monitor)
+        self.midi_profile_menu.add_separator()
+        self.midi_profile_menu.add_command(label="Export as TXT", command=self.export_midi_monitor_txt)
+        self.midi_profile_menu.add_command(label="Export as CSV", command=self.export_midi_monitor_csv)
+
     def _build_presets_tab(self) -> None:
         """Build the optional preset workspace tab.
 
@@ -518,24 +831,40 @@ class MainWindow:
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         group_specs = [
             ("File", [("Open Bank", self.open_bank), ("Open Preset", self.open_preset_into_bank), ("Save Bank", self.save_bank), ("Save Bank As", self.save_bank_as)]),
-            ("Send", [("Send Selected", self.send_selected_bank_slots), ("Send to Buffer", self.send_selected_to_buffer), ("Write Bank to XD", self.write_bank_to_xd)]),
+            ("Send", [("Send Selected", self.send_selected_bank_slots), ("Send to Buffer", self.send_selected_to_buffer), ("Play Preset", self.play_selected_bank_preset), ("Write Bank to XD", self.write_bank_to_xd)]),
             ("Edit", [("Cut", self.cut_bank_slot), ("Copy", self.copy_bank_slot), ("Paste", self.paste_bank_slot), ("Move To", self.move_bank_slot), ("Rename", self.rename_bank_slot), ("Clear / Init", self.clear_bank_slot), ("Undo", self.undo_bank), ("Change Log", self.show_change_log)]),
         ]
         for column, (title, buttons) in enumerate(group_specs):
             group = ttk.LabelFrame(controls, text=title)
             group.grid(row=0, column=column, sticky="nw", padx=(0, 8), pady=(0, 4))
             for index, (text, command) in enumerate(buttons):
-                ttk.Button(group, text=text, command=command).grid(row=index // 4, column=index % 4, padx=3, pady=3)
+                button = ttk.Button(group, text=text, command=command)
+                button.grid(row=index // 4, column=index % 4, padx=3, pady=3)
+                if text == "Play Preset":
+                    self.play_preset_buttons.append(button)
 
         self.bank_search_var = tk.StringVar()
         self.bank_search_var.trace_add("write", lambda *_: self.refresh_bank_tree())
+        self.case_sensitive_search_var.trace_add("write", lambda *_: self.refresh_bank_tree())
         search_group = ttk.LabelFrame(controls, text="Search")
         search_group.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         search_group.columnconfigure(1, weight=1)
         ttk.Label(search_group, text="Search").grid(row=0, column=0, sticky="w", padx=(8, 5), pady=5)
         ttk.Entry(search_group, textvariable=self.bank_search_var, width=34).grid(row=0, column=1, sticky="ew", pady=5)
         ttk.Button(search_group, text="Clear", command=self.clear_bank_search).grid(row=0, column=2, sticky="w", padx=5, pady=5)
-        ttk.Label(search_group, textvariable=self.bank_count_var, foreground="#5f6368").grid(row=0, column=3, sticky="e", padx=8, pady=5)
+        ttk.Checkbutton(
+            search_group,
+            text="Case sensitive search",
+            variable=self.case_sensitive_search_var,
+        ).grid(row=0, column=3, sticky="w", padx=5, pady=5)
+        play_preset_button = ttk.Button(
+            search_group,
+            text="Play Preset",
+            command=self.play_selected_bank_preset,
+        )
+        play_preset_button.grid(row=0, column=4, sticky="e", padx=5, pady=5)
+        self.play_preset_buttons.append(play_preset_button)
+        ttk.Label(search_group, textvariable=self.bank_count_var, foreground="#5f6368").grid(row=0, column=5, sticky="e", padx=8, pady=5)
         ttk.Label(
             controls,
             text="No bank loaded. Open a bank, load presets, or receive data from the minilogue xd.",
@@ -687,27 +1016,41 @@ class MainWindow:
             row=1, column=0, sticky="w", padx=8, pady=(4, 8)
         )
 
+        primary_buttons = ttk.Frame(midi_frame)
+        primary_buttons.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 4))
+        for column in range(4):
+            primary_buttons.columnconfigure(column, weight=1)
         for index, (text, command) in enumerate(
             [
                 ("Refresh MIDI Ports", self.refresh_ports),
                 ("Reconnect MIDI", self.reconnect_midi),
                 ("Disconnect MIDI", self.close_ports),
                 ("Save Port Combination", self.save_current_port_combination),
+            ]
+        ):
+            ttk.Button(primary_buttons, text=text, command=command).grid(
+                row=0, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0)
+            )
+
+        utility_buttons = ttk.Frame(midi_frame)
+        utility_buttons.grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+        for index, (text, command) in enumerate(
+            [
                 ("Open Log Folder", self.open_log_folder),
                 ("Copy Diagnostic Report", self.copy_diagnostic_report),
                 ("About", self.show_about),
                 ("Clear communication status", self.clear_communication_status),
             ]
         ):
-            ttk.Button(midi_frame, text=text, command=command).grid(
-                row=2, column=index, sticky="w", padx=(8 if index == 0 else 0, 5), pady=(4, 8)
+            ttk.Button(utility_buttons, text=text, command=command).grid(
+                row=0, column=index, sticky="w", padx=(0 if index == 0 else 5, 0)
             )
 
         ttk.Label(midi_frame, textvariable=self.port_hint_var, foreground="#5f6368").grid(
-            row=3, column=0, columnspan=6, sticky="ew", padx=8, pady=(0, 6)
+            row=4, column=0, columnspan=6, sticky="ew", padx=8, pady=(0, 6)
         )
         ttk.Label(midi_frame, textvariable=self.listen_status_var, foreground="#1a73e8").grid(
-            row=4, column=0, columnspan=6, sticky="ew", padx=8, pady=(0, 8)
+            row=5, column=0, columnspan=6, sticky="ew", padx=8, pady=(0, 8)
         )
 
         transfer = ttk.LabelFrame(self.settings_tab, text="Transfer Timing")
@@ -725,7 +1068,7 @@ class MainWindow:
         send_behavior = ttk.LabelFrame(self.settings_tab, text="Send Behavior")
         send_behavior.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         ttk.Checkbutton(send_behavior, text="Confirm before sending", variable=self.confirm_before_send_var).grid(row=0, column=0, sticky="w", padx=8, pady=6)
-        ttk.Checkbutton(send_behavior, text="Double-click sends preset to XD", variable=self.double_click_send_var).grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        ttk.Checkbutton(send_behavior, text="Double-click program to send selected preset", variable=self.double_click_send_var).grid(row=0, column=1, sticky="w", padx=8, pady=6)
         ttk.Checkbutton(send_behavior, text="Ask once per session before double-click send", variable=self.ask_double_click_once_var).grid(row=0, column=2, sticky="w", padx=8, pady=6)
         ttk.Checkbutton(send_behavior, text="Auto audition on selection", variable=self.auto_audition_var).grid(row=0, column=3, sticky="w", padx=8, pady=6)
 
@@ -831,6 +1174,7 @@ class MainWindow:
             ("Save as minilogue xd Program...", self.save_selected_as_mnlgxdprog, "data"),
             ("Save as SysEx...", self.save_selected_as_sysex, "data"),
             (None, None, "separator"),
+            ("Play Preset", self.play_selected_bank_preset, "data"),
             ("Send selected to XD", self.send_selected_bank_slots, "data"),
             ("Send selected to edit buffer", self.send_selected_to_buffer, "data"),
         ]
@@ -868,6 +1212,8 @@ class MainWindow:
             )
             if rule == "disabled":
                 enabled = False
+            if self.bank_context_menu.entrycget(index, "label") == "Play Preset" and self.audition_running:
+                enabled = False
             self.bank_context_menu.entryconfig(index, state=tk.NORMAL if enabled else tk.DISABLED)
 
     def refresh_ports(self) -> None:
@@ -876,20 +1222,120 @@ class MainWindow:
             output_ports = get_output_ports()
         except Exception as exc:
             self.append_log(log_line(f"Port refresh failed: {exc}"))
-            input_ports = []
-            output_ports = []
+            self.apply_port_scan_result([], [], startup_detection=False)
+            return
 
+        self.apply_port_scan_result(input_ports, output_ports, startup_detection=False)
+
+    def start_background_port_detection(self) -> None:
+        if self.startup_port_detection_running:
+            return
+        self.startup_port_detection_running = True
+        self.port_hint_var.set("Scanning MIDI ports for minilogue xd...")
+
+        def worker() -> None:
+            try:
+                input_ports = get_input_ports()
+                output_ports = get_output_ports()
+                error_message = ""
+            except Exception as exc:
+                input_ports = []
+                output_ports = []
+                error_message = str(exc)
+            self.gui_callback_queue.put(
+                lambda input_ports=input_ports, output_ports=output_ports, error_message=error_message: self.finish_background_port_detection(
+                    input_ports,
+                    output_ports,
+                    error_message,
+                )
+            )
+
+        threading.Thread(
+            target=worker,
+            name="startup-midi-port-detection",
+            daemon=True,
+        ).start()
+
+    def finish_background_port_detection(
+        self,
+        input_ports: list[str],
+        output_ports: list[str],
+        error_message: str = "",
+    ) -> None:
+        self.startup_port_detection_running = False
+        self.startup_port_detection_completed = True
+        if error_message:
+            self.append_log(log_line(f"Background MIDI port scan failed: {error_message}"))
+        self.apply_port_scan_result(
+            input_ports,
+            output_ports,
+            startup_detection=True,
+        )
+
+    def apply_port_scan_result(
+        self,
+        input_ports: list[str],
+        output_ports: list[str],
+        *,
+        startup_detection: bool,
+    ) -> None:
+        detected_xd = self.has_detected_xd_ports(input_ports, output_ports)
+        self.xd_detected_last_scan = detected_xd
         input_labels, self.input_port_map = self.build_port_labels(input_ports)
         output_labels, self.output_port_map = self.build_port_labels(output_ports)
         for combo in self.input_combos:
             combo["values"] = input_labels
         for combo in self.output_combos:
             combo["values"] = output_labels
-        self.select_port_label(self.input_port_var, self.input_port_map, self.settings.get("last_successful_midi_in"), input_labels)
-        self.select_port_label(self.output_port_var, self.output_port_map, self.settings.get("last_successful_midi_out"), output_labels)
+
+        preferred_in = self.settings.get("last_successful_midi_in")
+        preferred_out = self.settings.get("last_successful_midi_out")
+        self.select_port_label(
+            self.input_port_var,
+            self.input_port_map,
+            preferred_in,
+            input_labels,
+            allow_generic_fallback=not startup_detection,
+        )
+        self.select_port_label(
+            self.output_port_var,
+            self.output_port_map,
+            preferred_out,
+            output_labels,
+            allow_generic_fallback=not startup_detection,
+        )
+
+        if startup_detection and not detected_xd:
+            self.input_port_var.set("")
+            self.output_port_var.set("")
 
         self.update_port_hint(input_ports, output_ports)
         self.append_log(log_line(f"Ports refreshed: {len(input_ports)} input, {len(output_ports)} output"))
+
+        if startup_detection:
+            if detected_xd:
+                self.missing_xd_warning_pending = False
+                self.append_log(
+                    log_line(
+                        "minilogue xd detected: "
+                        f"IN={self.selected_input_port() or 'none'} | OUT={self.selected_output_port() or 'none'}"
+                    )
+                )
+                self.listen_status_var.set("minilogue xd detected. MIDI ports preselected.")
+                if self.auto_connect_var.get() and (self.selected_input_port() or self.selected_output_port()):
+                    self.open_ports()
+                    if self.receiver.is_open:
+                        self.append_log(log_line("MIDI auto-connect completed. No data was sent."))
+                    else:
+                        self.listen_status_var.set("MIDI: not connected - use Reconnect MIDI")
+                        if self.monitor_enabled_var.get():
+                            self.schedule_monitor_connection_retry()
+            else:
+                self.listen_status_var.set("Minilogue XD not detected. Please check MIDI connection.")
+                self.schedule_missing_xd_warning()
+        elif not self.receiver.is_open and not self.listen_status_var.get():
+            self.listen_status_var.set("MIDI: not connected - use Reconnect MIDI")
+
         self.update_status()
 
     @staticmethod
@@ -904,18 +1350,35 @@ class MainWindow:
         return labels, mapping
 
     @staticmethod
-    def is_sysex_candidate(port: str) -> bool:
-        lowered = port.lower()
-        return "minilogue xd" in lowered and (
-            "midiin2" in lowered or "midiout2" in lowered or lowered.endswith(" 2") or lowered.endswith(") 2")
+    def normalize_port_name(port: str) -> str:
+        return "".join(character.lower() for character in port if character.isalnum())
+
+    @classmethod
+    def is_sysex_candidate(cls, port: str) -> bool:
+        normalized = cls.normalize_port_name(port)
+        return "miniloguexd" in normalized and (
+            "midiin2" in normalized or "midiout2" in normalized or normalized.endswith("2")
         )
 
     @staticmethod
+    def is_minilogue_xd_port(port: str) -> bool:
+        return "miniloguexd" in MainWindow.normalize_port_name(port)
+
+    @classmethod
+    def has_detected_xd_ports(cls, input_ports: list[str], output_ports: list[str]) -> bool:
+        return any(cls.is_minilogue_xd_port(port) for port in input_ports) and any(
+            cls.is_minilogue_xd_port(port) for port in output_ports
+        )
+
+    @classmethod
     def select_port_label(
+        cls,
         variable: tk.StringVar,
         mapping: dict[str, str],
         preferred: str | None,
         labels: list[str],
+        *,
+        allow_generic_fallback: bool = False,
     ) -> None:
         """Select the best visible combobox label while preserving valid choices."""
         if preferred:
@@ -932,10 +1395,33 @@ class MainWindow:
                     variable.set(label)
                     return
         for label, port in mapping.items():
-            if MainWindow.is_sysex_candidate(port):
+            if cls.is_sysex_candidate(port):
                 variable.set(label)
                 return
-        variable.set(labels[0] if labels else "")
+        for label, port in mapping.items():
+            if cls.is_minilogue_xd_port(port):
+                variable.set(label)
+                return
+        if allow_generic_fallback and labels:
+            variable.set(labels[0])
+            return
+        variable.set("")
+
+    def schedule_missing_xd_warning(self) -> None:
+        if self.missing_xd_warning_shown or self.missing_xd_warning_pending:
+            return
+        self.missing_xd_warning_pending = True
+        self.schedule_after(_STARTUP_XD_WARNING_DELAY_MS, self.show_missing_xd_warning_if_needed)
+
+    def show_missing_xd_warning_if_needed(self) -> None:
+        self.missing_xd_warning_pending = False
+        if self.missing_xd_warning_shown or self.xd_detected_last_scan:
+            return
+        self.missing_xd_warning_shown = True
+        messagebox.showwarning(
+            "Minilogue XD not detected",
+            "Minilogue XD not detected. Please check MIDI connection.",
+        )
 
     def selected_input_port(self) -> str | None:
         selected = self.input_port_var.get().strip()
@@ -948,9 +1434,11 @@ class MainWindow:
     def update_port_hint(self, input_ports: list[str], output_ports: list[str]) -> None:
         candidates = [port for port in input_ports + output_ports if self.is_sysex_candidate(port)]
         if candidates:
-            self.port_hint_var.set("SysEx hint: Port-2 candidates are marked, but selection is never forced.")
+            self.port_hint_var.set("minilogue xd detected: Port-2 candidates are marked and preselected when available.")
+        elif self.has_detected_xd_ports(input_ports, output_ports):
+            self.port_hint_var.set("minilogue xd detected, but no clear Port-2 pair was found. Check the selected ports.")
         else:
-            self.port_hint_var.set("SysEx hint: all ports are shown; no Port-2 candidate detected.")
+            self.port_hint_var.set("Minilogue XD not detected. Please check MIDI connection.")
 
     def open_ports(self) -> None:
         input_name = self.selected_input_port()
@@ -963,7 +1451,8 @@ class MainWindow:
             self.settings["last_midi_in"] = input_name
             self.settings["last_midi_out"] = output_name
             self.persist_settings()
-            self.append_log(log_line("Ports opened. Send actions require explicit confirmation."))
+            self.append_log(log_line("Ports opened."))
+            self.monitor_connection_retry_pending = False
         self.update_status()
 
     def reconnect_midi(self) -> None:
@@ -972,6 +1461,7 @@ class MainWindow:
 
     def close_ports(self) -> None:
         self.receiver.close_ports()
+        self.monitor_connection_retry_pending = False
         self.append_log(log_line("Ports closed."))
         self.update_status()
 
@@ -1061,7 +1551,9 @@ class MainWindow:
             else:
                 self.capture_state = "finished"
                 self.listen_active = False
-                self.listen_status_var.set("No SysEx data received. Check MIDI input port and start the dump on the XD.")
+                message = "Dump failed: timeout before expected data was complete."
+                self.listen_status_var.set(message)
+                self.append_log(log_line(message))
                 self.append_log(log_line("WARNING: No SysEx data received. Check MIDI input port and start the dump on the XD."))
         elif event.kind == "cancelled":
             self.capture_state = "cancelled"
@@ -1069,6 +1561,9 @@ class MainWindow:
             self.listen_status_var.set("Capture cancelled.")
             self.append_log(log_line("Capture cancelled."))
         elif event.kind == "warning":
+            lowered = event.message.lower()
+            if "incomplete sysex frame" in lowered:
+                self.listen_status_var.set("Dump failed: incomplete SysEx message.")
             self.append_log(log_line(f"WARNING: {event.message}"))
         elif event.kind == "error":
             self.capture_state = "error"
@@ -1099,7 +1594,12 @@ class MainWindow:
         elif not self.capture_program_slots:
             self.listen_status_var.set("Waiting for dump...")
         if command is not None:
-            self.append_log(log_line(f"RX raw len={len(raw)} cmd=0x{command:02X} type={classification.label}"))
+            self.append_log(
+                log_line(
+                    f"RX raw len={len(raw)} cmd=0x{command:02X} type={classification.label}"
+                    f"{self.classification_log_suffix(classification)}"
+                )
+            )
         self.update_status()
 
     def handle_midi_message(self, item: QueuedMidiMessage) -> None:
@@ -1107,6 +1607,7 @@ class MainWindow:
         raw = self.strip_realtime_bytes(item.raw) if item.message_type == "sysex" else item.raw
         info = analyze_raw_message(raw, item.message_type)
         self.last_midi_info = info
+        self.append_midi_monitor_message(now, item, raw, info)
         is_realtime = is_realtime_message(info.message_type)
         if is_realtime:
             self.realtime_messages += 1
@@ -1159,6 +1660,7 @@ class MainWindow:
             self.append_log(
                 log_line(
                     f"RX SysEx len={len(raw)} cmd=0x{command:02X} type={classification.label}"
+                    f"{self.classification_log_suffix(classification)}"
                 )
             )
         if command == 0x23:
@@ -1235,6 +1737,660 @@ class MainWindow:
             self.expected_cmd = None
             self.listen_active = False
 
+    @staticmethod
+    def classification_log_suffix(classification) -> str:
+        if classification.command == 0x4C and classification.slot_index is not None:
+            return f" slot={classification.slot_index + 1:03d}"
+        return ""
+
+    def append_midi_monitor_message(
+        self,
+        timestamp: float,
+        item: QueuedMidiMessage,
+        raw: bytes,
+        info: MidiMessageInfo,
+    ) -> None:
+        self.remember_midi_monitor_context(raw, info)
+        if not self.monitor_enabled_var.get():
+            self.update_midi_monitor_status()
+            return
+
+        entry = self.build_midi_monitor_entry(timestamp, item, raw, info)
+        if entry is None:
+            self.midi_monitor_hidden_messages += 1
+            if self.midi_monitor_hidden_messages % 25 == 1:
+                self.update_midi_monitor_status()
+            return
+
+        self.midi_monitor_entries.append(entry)
+        self.midi_monitor_pending_lines.append((entry.line, entry.tag))
+        self.midi_monitor_visible_messages += 1
+        self.update_midi_monitor_status()
+        if not self.midi_monitor_flush_pending:
+            self.midi_monitor_flush_pending = True
+            self.schedule_after(_MIDI_MONITOR_FLUSH_MS, self.flush_midi_monitor)
+
+    def queue_outgoing_midi_monitor_message(self, raw: bytes, message_type: str) -> None:
+        self.gui_callback_queue.put(
+            lambda raw=raw, message_type=message_type: self.append_outgoing_midi_monitor_message(raw, message_type)
+        )
+
+    def append_outgoing_midi_monitor_message(self, raw: bytes, message_type: str) -> None:
+        item = QueuedMidiMessage(message=None, raw=raw, message_type=message_type)
+        info = analyze_raw_message(raw, message_type)
+        self.append_midi_monitor_message(time.time(), item, raw, info)
+
+    def midi_monitor_allows(self, message_type: str, is_sysex: bool) -> bool:
+        if is_sysex:
+            return self.monitor_show_sysex_var.get()
+        if message_type == "active_sensing":
+            return self.monitor_show_active_sensing_var.get()
+        if is_realtime_message(message_type):
+            return self.monitor_show_realtime_var.get()
+        if message_type in _MONITOR_NOTE_TYPES:
+            return self.monitor_show_notes_var.get()
+        if message_type == "control_change":
+            return self.monitor_show_control_change_var.get()
+        if message_type == "program_change":
+            return self.monitor_show_program_change_var.get()
+        if message_type == "pitchwheel":
+            return self.monitor_show_pitch_bend_var.get()
+        if message_type in _MONITOR_AFTERTOUCH_TYPES:
+            return self.monitor_show_aftertouch_var.get()
+        return self.monitor_show_other_var.get()
+
+    def remember_midi_monitor_context(self, raw: bytes, info: MidiMessageInfo) -> None:
+        channel = self.monitor_channel_from_raw(raw)
+        if channel is None:
+            return
+        if info.message_type == "control_change" and len(raw) >= 3:
+            control_number = raw[1]
+            self.monitor_cc_state.setdefault(channel, {})[control_number] = raw[2]
+
+    def build_midi_monitor_entry(
+        self,
+        timestamp: float,
+        item: QueuedMidiMessage,
+        raw: bytes,
+        info: MidiMessageInfo,
+    ) -> MidiMonitorEntry | None:
+        if not self.midi_monitor_allows(info.message_type, info.is_sysex):
+            return None
+
+        stamp = self.format_midi_monitor_timestamp(timestamp)
+        raw_hex = self.compact_midi_hex(raw)
+        profile = self.current_midi_profile()
+        technical = self.monitor_show_technical_var.get()
+
+        if info.is_sysex:
+            line = self.format_sysex_monitor_line(stamp, raw, info, technical)
+            return MidiMonitorEntry(
+                timestamp=stamp,
+                direction="in",
+                message_type="sysex",
+                channel=None,
+                parameter=profile.display_name_for_message("sysex"),
+                cc=None,
+                value=None,
+                value_label="",
+                raw_hex=raw_hex,
+                profile_id=profile.profile_id,
+                line=line,
+                tag=self.midi_monitor_tag_for("sysex", True),
+            )
+
+        channel = self.monitor_channel_from_raw(raw)
+        if info.message_type == "control_change" and len(raw) >= 3:
+            return self.build_control_change_monitor_entry(
+                stamp,
+                raw,
+                profile,
+                technical,
+                channel,
+            )
+        if info.message_type == "program_change" and len(raw) >= 2:
+            return self.build_program_change_monitor_entry(
+                stamp,
+                raw,
+                profile,
+                technical,
+                channel,
+            )
+
+        parameter = profile.display_name_for_message(info.message_type)
+        value = self.monitor_primary_value(info.message_type, raw)
+        value_label = self.monitor_value_label(info.message_type, raw)
+        if technical:
+            line = self.format_technical_monitor_line(
+                stamp,
+                info.message_type,
+                channel,
+                raw,
+                parameter=parameter,
+            )
+        else:
+            line = self.format_simple_monitor_line(
+                stamp,
+                channel,
+                parameter,
+                value,
+                value_label,
+            )
+        return MidiMonitorEntry(
+            timestamp=stamp,
+            direction="in",
+            message_type=info.message_type,
+            channel=channel,
+            parameter=parameter,
+            cc=None,
+            value=value,
+            value_label=value_label,
+            raw_hex=raw_hex,
+            profile_id=profile.profile_id,
+            line=line,
+            tag=self.midi_monitor_tag_for(info.message_type, False),
+        )
+
+    def build_control_change_monitor_entry(
+        self,
+        stamp: str,
+        raw: bytes,
+        profile: MidiProfile,
+        technical: bool,
+        channel: int | None,
+    ) -> MidiMonitorEntry | None:
+        control_number = raw[1]
+        value = raw[2]
+        definition = profile.definition_for_control(control_number)
+        if definition is not None:
+            if technical and not definition.show_in_technical_view:
+                return None
+            if not technical and not definition.show_in_simple_view:
+                return None
+        if (
+            not technical
+            and self.monitor_hide_cc63_var.get()
+            and control_number == 63
+        ):
+            return None
+
+        parameter = definition.name if definition is not None else f"CC {control_number}"
+        value_label = definition.label_for_value(value) if definition is not None else ""
+        if technical:
+            line = self.format_technical_monitor_line(
+                stamp,
+                "control_change",
+                channel,
+                raw,
+                parameter=parameter,
+            )
+        else:
+            line = self.format_simple_control_change_line(
+                stamp,
+                channel,
+                parameter,
+                value,
+                value_label,
+                definition.max_value if definition is not None else 127,
+            )
+
+        return MidiMonitorEntry(
+            timestamp=stamp,
+            direction="in",
+            message_type="control_change",
+            channel=channel,
+            parameter=parameter,
+            cc=control_number,
+            value=value,
+            value_label=value_label,
+            raw_hex=self.compact_midi_hex(raw),
+            profile_id=profile.profile_id,
+            line=line,
+            tag=self.midi_monitor_tag_for("control_change", False),
+        )
+
+    def build_program_change_monitor_entry(
+        self,
+        stamp: str,
+        raw: bytes,
+        profile: MidiProfile,
+        technical: bool,
+        channel: int | None,
+    ) -> MidiMonitorEntry:
+        raw_program = raw[1]
+        display_program = raw_program + 1
+        bank_msb = None
+        bank_lsb = None
+        absolute_program = None
+        bank_name = ""
+        bank_slot_text = ""
+        mapping = profile.program_mapping
+        if mapping is not None:
+            display_program = mapping.display_program_for_raw(raw_program)
+            if channel is not None and mapping.uses_bank_select:
+                channel_state = self.monitor_cc_state.get(channel, {})
+                bank_msb = channel_state.get(mapping.bank_select_msb_cc)
+                bank_lsb = channel_state.get(mapping.bank_select_lsb_cc)
+                bank, absolute_program = mapping.resolve(raw_program, bank_msb, bank_lsb)
+                if bank is not None:
+                    bank_name = bank.name
+                    bank_slot_text = f"{bank.name}{raw_program + mapping.display_base:03d}"
+
+        self.monitor_program_state[channel or 0] = {
+            "raw_program": raw_program,
+            "display_program": display_program,
+            "bank_msb": -1 if bank_msb is None else bank_msb,
+            "bank_lsb": -1 if bank_lsb is None else bank_lsb,
+            "absolute_program": -1 if absolute_program is None else absolute_program,
+        }
+
+        value_label = self.describe_program_change_value(
+            profile,
+            display_program,
+            bank_msb,
+            bank_lsb,
+            absolute_program,
+            bank_name,
+            bank_slot_text,
+        )
+        if technical:
+            line = self.format_program_change_technical_line(
+                stamp,
+                channel,
+                raw,
+                raw_program,
+                display_program,
+                bank_msb,
+                bank_lsb,
+                absolute_program,
+                bank_slot_text,
+            )
+        else:
+            line = self.format_simple_program_change_line(
+                stamp,
+                channel,
+                value_label,
+            )
+
+        return MidiMonitorEntry(
+            timestamp=stamp,
+            direction="in",
+            message_type="program_change",
+            channel=channel,
+            parameter=profile.display_name_for_message("program_change"),
+            cc=None,
+            value=display_program,
+            value_label=value_label,
+            raw_hex=self.compact_midi_hex(raw),
+            profile_id=profile.profile_id,
+            line=line,
+            tag=self.midi_monitor_tag_for("program_change", False),
+        )
+
+    def format_sysex_monitor_line(
+        self,
+        stamp: str,
+        raw: bytes,
+        info: MidiMessageInfo,
+        technical: bool,
+    ) -> str:
+        manufacturer = f"0x{info.manufacturer_id:02X}" if info.manufacturer_id is not None else "none"
+        classification = classify_xd_sysex(raw) if info.is_korg else None
+        if technical:
+            parts = [
+                f"manufacturer={manufacturer}",
+                f"korg={info.is_korg}",
+                f"length={info.length}",
+            ]
+            if classification is not None and classification.command is not None:
+                parts.append(f"cmd=0x{classification.command:02X}")
+                parts.append(f"type={classification.label}")
+            return f"{stamp} | sysex | " + " ".join(parts) + f" | {self.compact_midi_hex(raw)}"
+
+        summary = f"{stamp}  SysEx Summary"
+        details = [f"len {info.length}", f"mfr {manufacturer}"]
+        if classification is not None and classification.command is not None:
+            details.append(f"cmd 0x{classification.command:02X}")
+            details.append(classification.label)
+        return f"{summary:<32} {' | '.join(details)}"
+
+    def format_simple_control_change_line(
+        self,
+        stamp: str,
+        channel: int | None,
+        parameter: str,
+        value: int,
+        value_label: str,
+        max_value: int,
+    ) -> str:
+        prefix = f"{stamp}  Ch {channel or '-'}"
+        value_text = f"{value:>3} / {max_value}"
+        if value_label:
+            value_text += f" ({value_label})"
+        return f"{prefix:<16}  {parameter:<22} {value_text}"
+
+    def format_simple_monitor_line(
+        self,
+        stamp: str,
+        channel: int | None,
+        parameter: str,
+        value: int | None,
+        value_label: str,
+    ) -> str:
+        if channel is None:
+            suffix = value_label or ""
+            return f"{stamp}  {parameter}" + (f"  {suffix}" if suffix else "")
+
+        value_parts: list[str] = []
+        if value is not None:
+            value_parts.append(str(value))
+        if value_label:
+            value_parts.append(value_label)
+        suffix = " | ".join(value_parts)
+        return f"{stamp}  Ch {channel:<2}  {parameter:<22}" + (f" {suffix}" if suffix else "")
+
+    def describe_program_change_value(
+        self,
+        profile: MidiProfile,
+        display_program: int,
+        bank_msb: int | None,
+        bank_lsb: int | None,
+        absolute_program: int | None,
+        bank_name: str,
+        bank_slot_text: str,
+    ) -> str:
+        if absolute_program is not None:
+            if profile.program_mapping and profile.program_mapping.program_count:
+                return f"{bank_slot_text} (Program {absolute_program:03d} / {profile.program_mapping.program_count})"
+            return f"{bank_slot_text} (Program {absolute_program:03d})"
+        if bank_msb is not None or bank_lsb is not None:
+            return (
+                f"Bank {bank_msb if bank_msb is not None else '-'} / "
+                f"{bank_lsb if bank_lsb is not None else '-'}, Program {display_program}"
+            )
+        return f"Program {display_program}"
+
+    def format_simple_program_change_line(
+        self,
+        stamp: str,
+        channel: int | None,
+        summary: str,
+    ) -> str:
+        prefix = f"{stamp}  Ch {channel or '-'}"
+        return f"{prefix:<16}  {'Program Change':<22} {summary}"
+
+    def format_program_change_technical_line(
+        self,
+        stamp: str,
+        channel: int | None,
+        raw: bytes,
+        raw_program: int,
+        display_program: int,
+        bank_msb: int | None,
+        bank_lsb: int | None,
+        absolute_program: int | None,
+        bank_slot_text: str,
+    ) -> str:
+        parts = [f"{stamp} | program_change |"]
+        if channel is not None:
+            parts.append(f"channel={channel - 1}")
+        parts.append(f"program={raw_program}")
+        parts.append(f"display_program={display_program}")
+        if bank_msb is not None:
+            parts.append(f"bank_msb={bank_msb}")
+        if bank_lsb is not None:
+            parts.append(f"bank_lsb={bank_lsb}")
+        if absolute_program is not None:
+            parts.append(f"absolute_program={absolute_program}")
+        if bank_slot_text:
+            parts.append(f"slot={bank_slot_text}")
+        return " ".join(parts) + f" | {self.compact_midi_hex(raw)}"
+
+    def format_technical_monitor_line(
+        self,
+        stamp: str,
+        message_type: str,
+        channel: int | None,
+        raw: bytes,
+        *,
+        parameter: str = "",
+    ) -> str:
+        parts = [f"{stamp} | {message_type} |"]
+        if channel is not None:
+            parts.append(f"channel={channel - 1}")
+
+        if message_type == "control_change" and len(raw) >= 3:
+            parts.append(f"control={raw[1]}")
+            parts.append(f"value={raw[2]}")
+        elif message_type in {"note_on", "note_off"} and len(raw) >= 3:
+            parts.append(f"note={raw[1]}")
+            parts.append(f"velocity={raw[2]}")
+        elif message_type == "program_change" and len(raw) >= 2:
+            parts.append(f"program={raw[1]}")
+        elif message_type == "pitchwheel" and len(raw) >= 3:
+            parts.append(f"value={self.pitchwheel_value(raw)}")
+        elif message_type == "aftertouch" and len(raw) >= 2:
+            parts.append(f"value={raw[1]}")
+        elif message_type == "polytouch" and len(raw) >= 3:
+            parts.append(f"note={raw[1]}")
+            parts.append(f"value={raw[2]}")
+        if parameter:
+            parts.append(f"parameter={parameter}")
+        return " ".join(parts) + f" | {self.compact_midi_hex(raw)}"
+
+    @staticmethod
+    def monitor_channel_from_raw(raw: bytes) -> int | None:
+        if not raw:
+            return None
+        status = raw[0]
+        if 0x80 <= status <= 0xEF:
+            return (status & 0x0F) + 1
+        return None
+
+    @staticmethod
+    def format_midi_monitor_timestamp(timestamp: float) -> str:
+        milliseconds = int((timestamp - int(timestamp)) * 1000)
+        return f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}.{milliseconds:03d}"
+
+    @staticmethod
+    def midi_monitor_tag_for(message_type: str, is_sysex: bool) -> str:
+        if is_sysex:
+            return "sysex"
+        if is_realtime_message(message_type):
+            return "realtime"
+        if (
+            message_type in _MONITOR_NOTE_TYPES
+            or message_type == "control_change"
+            or message_type == "program_change"
+            or message_type == "pitchwheel"
+            or message_type in _MONITOR_AFTERTOUCH_TYPES
+        ):
+            return "channel"
+        return "other"
+
+    @staticmethod
+    def compact_midi_hex(raw: bytes) -> str:
+        if not raw:
+            return "(no bytes)"
+        return " ".join(f"{byte:02X}" for byte in raw)
+
+    def monitor_primary_value(self, message_type: str, raw: bytes) -> int | None:
+        if message_type in {"note_on", "note_off", "control_change", "polytouch"} and len(raw) >= 3:
+            return raw[2]
+        if message_type in {"program_change", "aftertouch"} and len(raw) >= 2:
+            return raw[1]
+        if message_type == "pitchwheel" and len(raw) >= 3:
+            return self.pitchwheel_value(raw)
+        return None
+
+    def monitor_value_label(self, message_type: str, raw: bytes) -> str:
+        if message_type == "note_on" and len(raw) >= 2:
+            return f"{self.note_name(raw[1])} velocity"
+        if message_type == "note_off" and len(raw) >= 2:
+            return f"{self.note_name(raw[1])} release"
+        if message_type == "pitchwheel":
+            return "bend"
+        if message_type == "aftertouch":
+            return "pressure"
+        if message_type == "polytouch" and len(raw) >= 2:
+            return self.note_name(raw[1])
+        return ""
+
+    @staticmethod
+    def pitchwheel_value(raw: bytes) -> int:
+        if len(raw) < 3:
+            return 0
+        combined = raw[1] | (raw[2] << 7)
+        return combined - 8192
+
+    @staticmethod
+    def note_name(note_number: int) -> str:
+        names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        octave = (note_number // 12) - 1
+        return f"{names[note_number % 12]}{octave}"
+
+    def flush_midi_monitor(self) -> None:
+        self.midi_monitor_flush_pending = False
+        if self.midi_monitor_text is None or not self.midi_monitor_pending_lines:
+            return
+
+        lines = self.midi_monitor_pending_lines
+        self.midi_monitor_pending_lines = []
+        for line, tag in lines:
+            if tag:
+                self.midi_monitor_text.insert(tk.END, line + "\n", tag)
+            else:
+                self.midi_monitor_text.insert(tk.END, line + "\n")
+        self.midi_monitor_text.see(tk.END)
+
+        current_lines = int(float(self.midi_monitor_text.index("end-1c").split(".")[0]))
+        excess = max(0, current_lines - _MIDI_MONITOR_MAX_LINES)
+        if excess:
+            self.midi_monitor_text.delete("1.0", f"{excess + 1}.0")
+
+    def clear_midi_monitor(self) -> None:
+        self.midi_monitor_pending_lines.clear()
+        self.midi_monitor_flush_pending = False
+        self.midi_monitor_visible_messages = 0
+        self.midi_monitor_hidden_messages = 0
+        self.midi_monitor_entries.clear()
+        self.monitor_cc_state.clear()
+        self.monitor_program_state.clear()
+        if self.midi_monitor_text is not None:
+            self.midi_monitor_text.delete("1.0", tk.END)
+        self.update_midi_monitor_status()
+
+    def update_midi_monitor_status(self) -> None:
+        if not self.monitor_enabled_var.get():
+            state = "paused"
+        elif self.receiver.is_open:
+            state = "running"
+        else:
+            state = "waiting for MIDI"
+        profile = self.current_midi_profile().display_name
+        self.midi_monitor_status_var.set(
+            f"Monitor: {state} | Profile: {profile} | "
+            f"{self.midi_monitor_visible_messages} shown, {self.midi_monitor_hidden_messages} hidden by filters"
+        )
+
+    def show_midi_monitor_context_menu(self, event: tk.Event) -> None:
+        if self.midi_profile_menu is None:
+            return
+        has_selection = self.midi_monitor_has_selection()
+        selection_state = tk.NORMAL if has_selection else tk.DISABLED
+        self.midi_profile_menu.entryconfigure("Copy Selection", state=selection_state)
+        self.midi_profile_menu.tk_popup(event.x_root, event.y_root)
+
+    def midi_monitor_has_selection(self) -> bool:
+        if self.midi_monitor_text is None:
+            return False
+        try:
+            self.midi_monitor_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            return False
+        return True
+
+    def copy_midi_monitor_to_clipboard(self, selection_only: bool = False) -> None:
+        if self.midi_monitor_text is None:
+            return
+        content = ""
+        if selection_only:
+            try:
+                content = self.midi_monitor_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            except tk.TclError:
+                content = ""
+        if not content:
+            content = self.midi_monitor_text.get("1.0", "end-1c")
+        if not content:
+            messagebox.showinfo("MIDI Monitor", "The MIDI Monitor is empty.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+
+    def export_midi_monitor_txt(self) -> None:
+        if self.midi_monitor_text is None:
+            return
+        content = self.midi_monitor_text.get("1.0", "end-1c")
+        if not content:
+            messagebox.showinfo("MIDI Monitor", "Nothing to export from the MIDI Monitor.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export MIDI Monitor as TXT",
+            defaultextension=".txt",
+            initialdir=str(user_data_dir()),
+            initialfile=f"midi_monitor_{time.strftime('%Y-%m-%d_%H%M%S')}.txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        Path(path).write_text(content + "\n", encoding="utf-8")
+
+    def export_midi_monitor_csv(self) -> None:
+        if not self.midi_monitor_entries:
+            messagebox.showinfo("MIDI Monitor", "Nothing to export from the MIDI Monitor.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export MIDI Monitor as CSV",
+            defaultextension=".csv",
+            initialdir=str(user_data_dir()),
+            initialfile=f"midi_monitor_{time.strftime('%Y-%m-%d_%H%M%S')}.csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        with Path(path).open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "timestamp",
+                    "direction",
+                    "message_type",
+                    "channel",
+                    "parameter",
+                    "cc",
+                    "value",
+                    "value_label",
+                    "raw_hex",
+                    "profile_id",
+                ]
+            )
+            for entry in self.midi_monitor_entries:
+                writer.writerow(
+                    [
+                        entry.timestamp,
+                        entry.direction,
+                        entry.message_type,
+                        entry.channel or "",
+                        entry.parameter,
+                        entry.cc if entry.cc is not None else "",
+                        entry.value if entry.value is not None else "",
+                        entry.value_label,
+                        entry.raw_hex,
+                        entry.profile_id,
+                    ]
+                )
+
     def current_filter_settings(self) -> MidiFilterSettings:
         return MidiFilterSettings(
             show_sysex_only=self.show_sysex_only_var.get(),
@@ -1261,8 +2417,9 @@ class MainWindow:
                 self.read_int(self.max_timeout_s_var.get(), 10),
             )
             if result:
-                self.append_log(log_line(f"Capture finalized by {result}."))
-                self.finalize_live_receive(result)
+                if self.listen_active:
+                    self.append_log(log_line(self.capture_timeout_text(result)))
+                    self.finalize_live_receive(result)
         self.check_listen_timeout()
         self.update_status()
         self.schedule_after(100, self.check_capture_timeouts)
@@ -1282,21 +2439,113 @@ class MainWindow:
             self.append_log(log_line(f"Request Slot timeout: no 0x4C response received{slot_text}"))
             self.listen_status_var.set(f"Request Slot timeout: no 0x4C response received{slot_text}")
 
+    @staticmethod
+    def capture_timeout_text(reason: str) -> str:
+        if reason == "inactivity":
+            return "Capture completed after inactivity timeout."
+        if reason == "timeout":
+            return "Capture completed after timeout."
+        return f"Capture completed: {reason}."
+
+    def analyze_captured_sysex_dump(self, raw: bytes) -> dict[str, object]:
+        records = build_records(raw)
+        bank_programs = import_sysex_programs_from_bytes(raw)
+        current_program = import_current_program_from_bytes(raw)
+        if current_program is not None and not bank_programs:
+            dump_kind = "current-program-dump"
+            export_formats = (".mnlgxdprog", ".syx")
+        elif len(bank_programs) == 1:
+            dump_kind = "single-program-dump-with-slot"
+            export_formats = (".mnlgxdprog", ".syx")
+        elif len(bank_programs) == 500:
+            dump_kind = "library-dump"
+            export_formats = (".mnlgxdlib", ".syx")
+        elif bank_programs:
+            dump_kind = "multi-program-dump"
+            export_formats = (".syx",)
+        else:
+            dump_kind = "raw-sysex-dump"
+            export_formats = (".syx",)
+        return {
+            "records": records,
+            "bank_programs": bank_programs,
+            "current_program": current_program,
+            "dump_kind": dump_kind,
+            "export_formats": export_formats,
+        }
+
+    def remember_captured_sysex_dump(self, raw: bytes, analysis: dict[str, object]) -> None:
+        self.last_captured_sysex_bytes = raw
+        self.last_captured_dump_kind = str(analysis["dump_kind"])
+        self.last_captured_export_formats = tuple(str(item) for item in analysis["export_formats"])
+        self.loaded_records = list(analysis["records"])
+        self.loaded_source_path = _CAPTURED_DUMP_SOURCE
+        self.analyzer_status_var.set(report_text(_CAPTURED_DUMP_SOURCE, self.loaded_records))
+
+    def clear_captured_sysex_dump(self) -> None:
+        self.last_captured_sysex_bytes = b""
+        self.last_captured_dump_kind = "none"
+        self.last_captured_export_formats = ()
+
+    def load_captured_programs_into_edit_view(
+        self,
+        programs: list[object],
+        *,
+        merge: bool,
+    ) -> int:
+        if not programs:
+            return 0
+        if merge:
+            loaded = self.bank.merge_programs(programs, _CAPTURED_DUMP_SOURCE, "captured", status="Captured")
+        else:
+            self.bank.load_programs_by_slot(programs, _CAPTURED_DUMP_SOURCE, "captured", status="Captured")
+            loaded = sum(1 for program in programs if getattr(program, "slot_index", None) is not None)
+        self.current_bank_path = None
+        self.refresh_bank_tree()
+        self.append_log(log_line(f"Loaded {loaded} programs from captured SysEx dump into Edit view."))
+        self.dirty = True
+        self.update_window_title()
+        return loaded
+
+    def apply_captured_current_program_to_edit_view(self, program: object) -> None:
+        name = getattr(program, "name", "") or "name unknown"
+        self.bank.load_programs([program], _CAPTURED_DUMP_SOURCE, "captured-current", status="Captured")
+        self.current_bank_path = None
+        self.refresh_bank_tree()
+        self.append_log(log_line("Loaded 1 program from captured SysEx dump into Edit view."))
+        self.listen_status_var.set(f"Loaded current program into Edit view: {name}")
+        self.dirty = True
+        self.update_window_title()
+
     def finalize_bank_receive(self, reason: str = "inactivity") -> None:
         raw = self.sysex_buffer.to_bytes()
+        analysis = self.analyze_captured_sysex_dump(raw)
+        self.remember_captured_sysex_dump(raw, analysis)
+        capture = self.sysex_buffer.capture
+        message_count = len(capture.messages) if capture else len(self.loaded_records)
+        total_bytes = capture.total_bytes if capture else len(raw)
         summary = summarize_xd_sysex_stream(raw)
         self.append_log(log_line("SysEx receive summary:"))
         for label, count in summary.items():
             self.append_log(log_line(f"{label}: {count}"))
-        programs = import_sysex_programs_from_bytes(raw)
+        programs = list(analysis["bank_programs"])
         if programs:
-            self.bank.merge_programs(programs, "XD Capture", "Received", status="Captured")
-            self.refresh_bank_tree()
+            self.load_captured_programs_into_edit_view(programs, merge=True)
             total_filled = sum(1 for slot in self.bank.slots if slot.raw or slot.prog_bin)
+            self.append_log(
+                log_line(
+                    f"Dump received successfully: {message_count} SysEx messages, {total_bytes} bytes."
+                )
+            )
             result = f"Captured bank: {total_filled}/500 programs."
-            self.mark_dirty(result)
             self.listen_status_var.set(result)
             self.append_log(log_line(f"{result} Finalized by {reason}."))
+            self.append_log(
+                log_line(
+                    "Captured dump export formats: "
+                    + ", ".join(self.last_captured_export_formats or (".syx",))
+                )
+            )
             if total_filled != 500:
                 missing = [
                     index
@@ -1318,11 +2567,44 @@ class MainWindow:
         self.expected_slot = None
 
     def finalize_sysex_receive(self, reason: str = "inactivity") -> None:
+        raw = self.sysex_buffer.to_bytes()
         capture = self.sysex_buffer.capture
         message_count = len(capture.messages) if capture else 0
-        total_bytes = capture.total_bytes if capture else len(self.sysex_buffer.to_bytes())
+        total_bytes = capture.total_bytes if capture else len(raw)
+        analysis = self.analyze_captured_sysex_dump(raw)
+        self.remember_captured_sysex_dump(raw, analysis)
+        bank_programs = list(analysis["bank_programs"])
+        current_program = analysis["current_program"]
+        if bank_programs:
+            self.load_captured_programs_into_edit_view(bank_programs, merge=False)
+            self.append_log(
+                log_line(
+                    f"Dump received successfully: {message_count} SysEx messages, {total_bytes} bytes."
+                )
+            )
+            self.listen_status_var.set(f"Loaded {len(bank_programs)} program(s) into Edit view.")
+            self.append_log(
+                log_line(
+                    "Captured dump export formats: "
+                    + ", ".join(self.last_captured_export_formats or (".syx",))
+                )
+            )
+        elif current_program is not None:
+            self.apply_captured_current_program_to_edit_view(current_program)
+            self.append_log(
+                log_line(
+                    f"Dump received successfully: {message_count} SysEx messages, {total_bytes} bytes."
+                )
+            )
+            self.append_log(
+                log_line(
+                    "Captured dump export formats: "
+                    + ", ".join(self.last_captured_export_formats or (".syx",))
+                )
+            )
         result = f"Captured SysEx: {message_count} message(s), {total_bytes} bytes."
-        self.listen_status_var.set(result)
+        if not bank_programs and current_program is None:
+            self.listen_status_var.set(result)
         self.append_log(log_line(f"{result} Finalized by {reason}."))
         self.expected_cmd = None
         self.expected_slot = None
@@ -1423,8 +2705,7 @@ class MainWindow:
                 f"Invalid record(s): {', '.join(map(str, invalid[:10]))}",
             )
             return False
-        if not self.engine3_output_ready():
-            messagebox.showwarning("No MIDI OUT", "Select a MIDI OUT port first.")
+        if not self.ensure_output_port_open():
             return False
         slot_text = self.describe_record_slots(records)
         if self.confirm_before_send_var.get() and not messagebox.askyesno(
@@ -1471,8 +2752,154 @@ class MainWindow:
     def start_send_worker(self, messages: list[bytes], delay_ms: int, label: str, progress) -> None:
         self.start_send_worker_with_callbacks(messages, delay_ms, label, progress)
 
-    def engine3_output_ready(self) -> bool:
+    def has_output_port(self) -> bool:
         return bool(self.selected_output_port())
+
+    def output_port_is_open(self) -> bool:
+        return self.receiver.output_name == self.selected_output_port()
+
+    def ensure_output_port_open(self) -> bool:
+        if not self.has_output_port():
+            messagebox.showwarning("No MIDI OUT", _NO_MIDI_OUT_MESSAGE)
+            return False
+        if self.output_port_is_open():
+            return True
+        self.open_ports()
+        if self.output_port_is_open():
+            return True
+        messagebox.showwarning("No MIDI OUT", _NO_MIDI_OUT_MESSAGE)
+        return False
+
+    def ensure_audition_output_port_open(self) -> bool:
+        if not self.has_output_port():
+            messagebox.showwarning("No MIDI OUT", _NO_AUDITION_MIDI_OUT_MESSAGE)
+            return False
+        if self.output_port_is_open():
+            return True
+        self.open_ports()
+        if self.output_port_is_open():
+            return True
+        messagebox.showwarning("No MIDI OUT", _NO_AUDITION_MIDI_OUT_MESSAGE)
+        return False
+
+    def play_selected_bank_preset(self) -> None:
+        if self.current_sender is not None:
+            messagebox.showwarning("Busy", "A send operation is already in progress.")
+            return
+        if self.audition_running:
+            return
+        indices = self.selected_bank_indices()
+        if len(indices) != 1:
+            messagebox.showinfo("Select one preset", "Select exactly one preset to play.")
+            return
+        index = indices[0]
+        slot = self.bank.slots[index]
+        if not (slot.raw or slot.prog_bin):
+            messagebox.showinfo("No preset data", "Select a populated preset to play.")
+            return
+        if not self.ensure_audition_output_port_open():
+            return
+        try:
+            current_dump = self.current_buffer_raw_for_slot(index)
+        except ValueError as exc:
+            messagebox.showwarning("Cannot audition preset", str(exc))
+            return
+        output_port = getattr(self.receiver, "output_port", None)
+        if output_port is None:
+            messagebox.showwarning("No MIDI OUT", _NO_AUDITION_MIDI_OUT_MESSAGE)
+            return
+        sender = self.make_sysex_sender()
+
+        label = slot.name or map_slot(index).bank_slot_text
+        self.audition_running = True
+        self.current_sender = sender
+        self.set_play_preset_button_state(tk.DISABLED)
+        self.listen_status_var.set("Audition: sending selected preset to XD edit buffer.")
+        self.append_log(log_line(f"Audition: preparing selected preset for XD edit buffer: {label}"))
+
+        def worker() -> None:
+            sent_notes: list[int] = []
+            try:
+                sender.send_messages([current_dump], 0)
+                self.queue_outgoing_midi_monitor_message(current_dump, "sysex")
+                self.gui_callback_queue.put(
+                    lambda: self.listen_status_var.set("Audition: sent selected preset to XD edit buffer.")
+                )
+                self.gui_callback_queue.put(
+                    lambda: self.append_log(log_line(f"Audition: sent selected preset to XD edit buffer: {label}"))
+                )
+                time.sleep(_AUDITION_BUFFER_SETTLE_MS / 1000)
+                if sender.cancel_requested:
+                    self.stop_audition_notes(output_port, sent_notes)
+                    self.gui_callback_queue.put(self.finish_audition_success)
+                    return
+                self.gui_callback_queue.put(
+                    lambda: self.listen_status_var.set("Playing audition sequence for selected preset.")
+                )
+                self.gui_callback_queue.put(
+                    lambda: self.append_log(log_line(f"Playing audition sequence for selected preset: {label}"))
+                )
+                for note in _AUDITION_NOTES:
+                    if sender.cancel_requested:
+                        break
+                    note_on = mido.Message("note_on", channel=0, note=note, velocity=_AUDITION_VELOCITY)
+                    self.send_audition_output_message(output_port, note_on)
+                    sent_notes.append(note)
+                    time.sleep(_AUDITION_NOTE_LENGTH_MS / 1000)
+                    note_off = mido.Message("note_off", channel=0, note=note, velocity=0)
+                    self.send_audition_output_message(output_port, note_off)
+                    sent_notes.pop()
+                    time.sleep(_AUDITION_GAP_MS / 1000)
+            except Exception as exc:
+                self.stop_audition_notes(output_port, sent_notes)
+                self.gui_callback_queue.put(lambda exc=exc: self.finish_audition_with_error(exc))
+                return
+
+            self.stop_audition_notes(output_port, sent_notes)
+            self.gui_callback_queue.put(self.finish_audition_success)
+
+        threading.Thread(target=worker, name="preset-audition-worker", daemon=True).start()
+
+    def send_audition_output_message(self, output_port, message: mido.Message) -> None:
+        output_port.send(message)
+        self.queue_outgoing_midi_monitor_message(bytes(message.bytes()), message.type)
+
+    def stop_audition_notes(self, output_port, notes: list[int]) -> None:
+        for note in list(notes):
+            try:
+                self.send_audition_output_message(
+                    output_port,
+                    mido.Message("note_off", channel=0, note=note, velocity=0),
+                )
+            except Exception:
+                pass
+        try:
+            self.send_audition_output_message(
+                output_port,
+                mido.Message("control_change", channel=0, control=123, value=0),
+            )
+        except Exception:
+            pass
+
+    def finish_audition_success(self) -> None:
+        self.audition_running = False
+        self.current_sender = None
+        self.set_play_preset_button_state(tk.NORMAL)
+        self.listen_status_var.set("Audition finished.")
+        self.append_log(log_line("Audition finished."))
+
+    def finish_audition_with_error(self, exc: Exception) -> None:
+        self.audition_running = False
+        self.current_sender = None
+        self.set_play_preset_button_state(tk.NORMAL)
+        self.last_error = str(exc)
+        self.logger.error("Play Preset failed: %s", exc, exc_info=exc)
+        self.append_log(log_line(f"Play Preset failed: {exc}"))
+        messagebox.showerror("Play Preset", str(exc))
+
+    def set_play_preset_button_state(self, state: str) -> None:
+        for button in self.play_preset_buttons:
+            button.configure(state=state)
 
     def make_sysex_sender(self):
         return Engine3SysexSender(self.receiver.make_sender())
@@ -1574,6 +3001,7 @@ class MainWindow:
         if validation.status not in {COMPATIBLE, PROBABLY_COMPATIBLE}:
             messagebox.showwarning("Import blocked", f"{validation.status}: {validation.message}")
             return
+        self.clear_captured_sysex_dump()
         try:
             if source_path.suffix.lower() == ".mnlgxdprog":
                 programs = [load_mnlgxdprog(source_path)]
@@ -1753,6 +3181,7 @@ class MainWindow:
         if validation.status not in {COMPATIBLE, PROBABLY_COMPATIBLE}:
             messagebox.showwarning("Import blocked", f"{validation.status}: {validation.message}")
             return
+        self.clear_captured_sysex_dump()
         if source_path.suffix.lower() == ".mnlgxdlib":
             try:
                 library = load_mnlgxdlib(source_path)
@@ -1811,6 +3240,7 @@ class MainWindow:
         if not programs:
             messagebox.showwarning("Decode failed", "0x4C program dumps were found, but no programs could be decoded.")
             return
+        self.clear_captured_sysex_dump()
         self.loaded_records = build_records(analysis.all_sysex_bytes())
         self.loaded_source_path = str(source_path)
         self.analyzer_status_var.set(self.pocket_analysis_text(source_path, analysis, validation))
@@ -1883,7 +3313,7 @@ class MainWindow:
         self.bank_count_var.set(f"{len(visible_indices)} / {len(self.bank.slots)} shown")
 
     def bank_slot_matches_filter(self, index: int, slot) -> bool:
-        query = self.bank_search_var.get().strip().lower() if hasattr(self, "bank_search_var") else ""
+        query = self.bank_search_var.get().strip() if hasattr(self, "bank_search_var") else ""
         if not query:
             return True
         slot_mapping = map_slot(index)
@@ -1895,7 +3325,10 @@ class MainWindow:
                 slot.status or "",
                 slot.notes or "",
             ]
-        ).lower()
+        )
+        if not self.case_sensitive_search_var.get():
+            query = query.casefold()
+            searchable = searchable.casefold()
         return query in searchable
 
     def bank_sort_value(self, index: int, column: str):
@@ -1933,21 +3366,19 @@ class MainWindow:
         if self.current_bank_path is None:
             self.save_bank_as()
             return
-        if self.current_bank_path.suffix.lower() not in {".mnlgxdlib", ".syx"}:
+        if self.current_bank_path.suffix.lower() not in {".mnlgxdlib", ".mnlgxdprog", ".syx"}:
             self.save_bank_as()
             return
         self.save_bank_to_path(self.current_bank_path)
 
     def save_bank_as(self) -> None:
-        if not any(slot.raw or slot.prog_bin for slot in self.bank.slots):
-            messagebox.showinfo("Empty bank", "No raw bank data is loaded.")
+        if not self.can_save_workspace_or_capture():
+            messagebox.showinfo("Nothing to save", "No captured or loaded program data is available.")
             return
+        default_extension, filetypes = self.available_save_filetypes()
         path = filedialog.asksaveasfilename(
-            defaultextension=".mnlgxdlib",
-            filetypes=[
-                ("minilogue xd Library", "*.mnlgxdlib"),
-                ("SysEx", "*.syx"),
-            ],
+            defaultextension=default_extension,
+            filetypes=filetypes,
         )
         if path:
             self.save_bank_to_path(Path(path))
@@ -1955,9 +3386,46 @@ class MainWindow:
     def save_bank_copy(self) -> None:
         self.save_bank_as()
 
+    def can_save_workspace_or_capture(self) -> bool:
+        return any(slot.raw or slot.prog_bin for slot in self.bank.slots) or bool(self.last_captured_sysex_bytes)
+
+    def available_save_filetypes(self) -> tuple[str, list[tuple[str, str]]]:
+        programs = self.bank.export_programs()
+        if len(programs) == 500:
+            return ".mnlgxdlib", [("minilogue xd Library", "*.mnlgxdlib"), ("SysEx", "*.syx")]
+        if len(programs) == 1:
+            return ".mnlgxdprog", [("minilogue xd Program", "*.mnlgxdprog"), ("SysEx", "*.syx")]
+        if self.last_captured_export_formats == (".mnlgxdlib", ".syx"):
+            return ".mnlgxdlib", [("minilogue xd Library", "*.mnlgxdlib"), ("SysEx", "*.syx")]
+        if ".mnlgxdprog" in self.last_captured_export_formats:
+            return ".mnlgxdprog", [("minilogue xd Program", "*.mnlgxdprog"), ("SysEx", "*.syx")]
+        return ".syx", [("SysEx", "*.syx")]
+
+    def export_raw_sysex_bytes(self) -> bytes:
+        if self.last_captured_sysex_bytes:
+            return self.last_captured_sysex_bytes
+        return b"".join(
+            self.bank.raw_for_slot(index)
+            for index in range(len(self.bank.slots))
+            if self.bank.raw_for_slot(index)
+        )
+
+    def program_for_single_program_export(self):
+        programs = self.bank.export_programs()
+        if len(programs) == 1:
+            return programs[0]
+        if self.last_captured_sysex_bytes:
+            current_program = import_current_program_from_bytes(self.last_captured_sysex_bytes)
+            if current_program is not None:
+                return current_program
+            captured_programs = import_sysex_programs_from_bytes(self.last_captured_sysex_bytes)
+            if len(captured_programs) == 1:
+                return captured_programs[0]
+        return None
+
     def save_bank_to_path(self, target: Path) -> None:
-        if not any(slot.raw or slot.prog_bin for slot in self.bank.slots):
-            messagebox.showinfo("Empty bank", "No raw bank data is loaded.")
+        if not self.can_save_workspace_or_capture():
+            messagebox.showinfo("Nothing to save", "No captured or loaded program data is available.")
             return
         if self.ask_overwrite_files_var.get() and target.exists() and not messagebox.askokcancel(
             "Overwrite existing bank file?",
@@ -1965,7 +3433,8 @@ class MainWindow:
         ):
             return
         programs = self.bank.export_programs()
-        if target.suffix.lower() == ".mnlgxdlib":
+        suffix = target.suffix.lower()
+        if suffix == ".mnlgxdlib":
             if len(programs) != 500:
                 messagebox.showwarning(
                     "Incomplete library",
@@ -1973,8 +3442,17 @@ class MainWindow:
                 )
                 return
             save_mnlgxdlib(XDLibrary(programs=programs), target)
+        elif suffix == ".mnlgxdprog":
+            program = self.program_for_single_program_export()
+            if program is None:
+                messagebox.showwarning(
+                    "Single program export unavailable",
+                    "A .mnlgxdprog export needs exactly one decoded program in the current workspace or capture.",
+                )
+                return
+            save_mnlgxdprog(program, target)
         else:
-            raw = b"".join(self.bank.raw_for_slot(index) for index in range(len(self.bank.slots)) if self.bank.raw_for_slot(index))
+            raw = self.export_raw_sysex_bytes()
             if not raw:
                 messagebox.showinfo("Empty bank", "No raw SysEx data is available to export.")
                 return
@@ -1984,8 +3462,8 @@ class MainWindow:
         self.append_log(log_line(f"Saved bank/export: {target}"))
 
     def export_bank_as_sysex(self) -> None:
-        if not any(slot.raw or slot.prog_bin for slot in self.bank.slots):
-            messagebox.showinfo("Empty bank", "No raw bank data is loaded.")
+        if not self.can_save_workspace_or_capture():
+            messagebox.showinfo("Nothing to export", "No captured or loaded SysEx data is available.")
             return
         path = filedialog.asksaveasfilename(
             title="Export Bank as SysEx",
@@ -2017,9 +3495,8 @@ class MainWindow:
                 self.append_log(
                     log_line(
                         "Preparing send: "
-                        f"GUI slot={map_slot(index).bank_slot_text} index={index} "
-                        f"Model patch name={slot.name or 'Empty'} "
-                        f"Raw header={format_hex(raw[6:10])} Bytes={len(raw)}"
+                        f"slot {map_slot(index).bank_slot_text}, index {index}, "
+                        f"patch '{slot.name or 'Empty'}', command 0x{raw[6]:02X}, {len(raw)} bytes."
                     )
                 )
         if invalid_headers:
@@ -2074,16 +3551,9 @@ class MainWindow:
         indices = self.selected_bank_indices()
         if not indices:
             return
-        name = simpledialog.askstring(
-            "Rename program",
-            "New program name:",
-            initialvalue=self.bank.slots[indices[0]].name,
-        )
-        if name is not None:
-            old_name = self.bank.slots[indices[0]].name
-            self.bank.rename(indices[0], name)
-            self.mark_dirty(f'Renamed {map_slot(indices[0]).bank_slot_text}: "{old_name}" -> "{name}"')
-            self.refresh_bank_tree()
+        item = str(indices[0])
+        self.bank_tree.selection_set(item)
+        self.start_inline_bank_rename(item, indices[0])
         return "break" if _event is not None else None
 
     def copy_bank_slot(self, _event: tk.Event | None = None):
@@ -2282,6 +3752,8 @@ class MainWindow:
             return
         item = self.bank_tree.identify_row(event.y)
         target = self.parse_bank_iid(item)
+        column = self.bank_tree.identify_column(event.x)
+        region = self.bank_tree.identify_region(event.x, event.y)
         if target is not None:
             if target != self.bank_drag_start_index:
                 source = self.bank_drag_start_index
@@ -2293,9 +3765,12 @@ class MainWindow:
                         f"Moved bank slot {source + 1} to {target + 1} by drag."
                     )
                 )
+            elif region == "cell" and column == "#2":
+                self.schedule_inline_bank_rename(item, target)
         self.bank_drag_start_index = None
 
     def on_bank_double_click(self, event: tk.Event) -> None:
+        self.cancel_pending_inline_bank_rename()
         if not self.double_click_send_var.get():
             return
         region = self.bank_tree.identify_region(event.x, event.y)
@@ -2304,6 +3779,81 @@ class MainWindow:
             return
         self.bank_tree.selection_set(item)
         self.send_selected_bank_slots()
+
+    def schedule_inline_bank_rename(self, item: str, index: int) -> None:
+        self.cancel_pending_inline_bank_rename()
+        if self.inline_name_editor is not None:
+            self.cancel_inline_bank_rename()
+        job_id = ""
+
+        def begin() -> None:
+            if job_id:
+                self._after_jobs.discard(job_id)
+            self.pending_inline_rename_job = None
+            self.start_inline_bank_rename(item, index)
+
+        job_id = self.root.after(_INLINE_RENAME_DELAY_MS, begin)
+        self.pending_inline_rename_job = job_id
+        self._after_jobs.add(job_id)
+
+    def cancel_pending_inline_bank_rename(self) -> None:
+        if not self.pending_inline_rename_job:
+            return
+        try:
+            self.root.after_cancel(self.pending_inline_rename_job)
+        except tk.TclError:
+            pass
+        self._after_jobs.discard(self.pending_inline_rename_job)
+        self.pending_inline_rename_job = None
+
+    def start_inline_bank_rename(self, item: str, index: int) -> None:
+        self.cancel_pending_inline_bank_rename()
+        self.cancel_inline_bank_rename()
+        if not self.bank_tree.exists(item):
+            return
+        bbox = self.bank_tree.bbox(item, "name")
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        entry = ttk.Entry(self.bank_tree)
+        entry.place(x=x, y=y, width=width, height=height)
+        original = self.bank.slots[index].name
+        entry.insert(0, original)
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+        entry.bind("<Return>", self.commit_inline_bank_rename)
+        entry.bind("<Escape>", self.cancel_inline_bank_rename)
+        entry.bind("<FocusOut>", self.commit_inline_bank_rename)
+        self.inline_name_editor = entry
+        self.inline_name_editor_item = item
+        self.inline_name_editor_index = index
+        self.inline_name_editor_original = original
+
+    def commit_inline_bank_rename(self, _event: tk.Event | None = None):
+        if self.inline_name_editor is None or self.inline_name_editor_index is None:
+            return "break" if _event is not None else None
+        name = self.inline_name_editor.get()
+        index = self.inline_name_editor_index
+        old_name = self.inline_name_editor_original
+        self.destroy_inline_bank_editor()
+        if name != old_name:
+            self.bank.rename(index, name)
+            self.mark_dirty(f'Renamed {map_slot(index).bank_slot_text}: "{old_name}" -> "{name}"')
+            self.refresh_bank_tree()
+            self.bank_tree.selection_set(str(index))
+        return "break" if _event is not None else None
+
+    def cancel_inline_bank_rename(self, _event: tk.Event | None = None):
+        self.destroy_inline_bank_editor()
+        return "break" if _event is not None else None
+
+    def destroy_inline_bank_editor(self) -> None:
+        if self.inline_name_editor is not None:
+            self.inline_name_editor.destroy()
+        self.inline_name_editor = None
+        self.inline_name_editor_item = None
+        self.inline_name_editor_index = None
+        self.inline_name_editor_original = ""
 
     @staticmethod
     def program_to_record(program, index: int) -> SysexRecord:
@@ -2343,6 +3893,14 @@ class MainWindow:
     def refresh_user_units_trees(self) -> None:
         units = scan_user_units(user_units_dir())
         units_by_filename = {unit.path.name: unit for unit in units}
+        assigned_filenames = {
+            assignment.filename
+            for assignment in self.user_unit_assignments.values()
+            if assignment.filename
+        }
+        unassigned_units = [
+            unit for unit in units if unit.path.name not in assigned_filenames
+        ]
         if hasattr(self, "user_osc_tree"):
             self.user_osc_tree.delete(*self.user_osc_tree.get_children())
             for slot in USER_OSC_SLOTS:
@@ -2351,12 +3909,25 @@ class MainWindow:
             tree.delete(*tree.get_children())
             for slot in (slot for slot in USER_FX_SLOTS if slot.key.startswith(prefix)):
                 self.insert_user_unit_row(tree, slot, units_by_filename, include_source=False)
+        for unit in unassigned_units:
+            self.insert_unassigned_user_unit_row(unit)
+        osc_unassigned = sum(1 for unit in unassigned_units if unit.module == "osc")
+        fx_unassigned = sum(1 for unit in unassigned_units if unit.module in {"modfx", "delfx", "revfx"})
+        other_unassigned = len(unassigned_units) - osc_unassigned - fx_unassigned
         self.user_osc_status_var.set(
-            "User OSC local slots 1-16. Read from XD is not implemented because User Units "
+            "User OSC local slots 1-16. "
+            f"Unassigned OSC files: {osc_unassigned}. "
+            + (
+                f"Other unsupported local files: {other_unassigned}. "
+                if other_unassigned
+                else ""
+            )
+            + "Read from XD is not implemented because User Units "
             "do not use the normal Program Dump workflow."
         )
         self.user_fx_status_var.set(
             "User FX local slots: Mod FX 1-16, Delay FX 1-8, Reverb FX 1-8. "
+            f"Unassigned FX files: {fx_unassigned}. "
             "Send/read hardware actions stay disabled until the logue transfer protocol is verified."
         )
 
@@ -2387,6 +3958,30 @@ class MainWindow:
                 unit.notes or f"{unit.size} bytes | {unit.short_hash}",
             )
         tree.insert("", tk.END, iid=slot.key, values=values if include_source else values[:5])
+
+    def insert_unassigned_user_unit_row(self, unit: UserUnitFile) -> None:
+        tree, include_source = self.user_unit_tree_for(unit)
+        values = (
+            "Local file",
+            unit.name,
+            unit.module,
+            unit.compatibility,
+            "unassigned local file",
+            unit.path.name,
+            unit.notes or f"{unit.size} bytes | {unit.short_hash}",
+        )
+        tree.insert(
+            "",
+            tk.END,
+            iid=f"file:{unit.path.name}",
+            values=values if include_source else values[:5],
+        )
+
+    def user_unit_tree_for(self, unit: UserUnitFile) -> tuple[ttk.Treeview, bool]:
+        fx_tree = getattr(self, "user_fx_trees", {}).get(unit.module)
+        if fx_tree is not None:
+            return fx_tree, False
+        return self.user_osc_tree, True
 
     def import_user_units(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -2706,6 +4301,8 @@ class MainWindow:
         if not input_name:
             messagebox.showwarning("No MIDI IN", "Select a MIDI IN port first.")
             return
+        # Re-detect at capture time so a freshly installed helper is picked up
+        # without requiring an app restart.
         self.native_capture_status = detect_engine3_native_runtime()
         if not self.native_capture_status.available:
             messagebox.showerror("Native capture helper missing", self.native_capture_status.status_text)
@@ -2918,12 +4515,7 @@ class MainWindow:
         if not self.selected_input_port():
             messagebox.showwarning("No MIDI IN", "Select a MIDI IN port first.")
             return False
-        if not self.selected_output_port():
-            messagebox.showwarning("No MIDI OUT", "Select a MIDI OUT port first.")
-            return False
-        if not self.receiver.is_open:
-            self.open_ports()
-        return bool(self.receiver.is_open and self.engine3_output_ready())
+        return bool(self.ensure_output_port_open())
 
     def send_request_sysex(self, raw: bytes, label: str) -> None:
         self.send_request_sysex_batch([raw], label)
@@ -2932,8 +4524,7 @@ class MainWindow:
         if self.current_sender is not None:
             messagebox.showwarning("Busy", "A send operation is already in progress.")
             return
-        if not self.engine3_output_ready():
-            messagebox.showwarning("No MIDI OUT", "Select a MIDI OUT port first.")
+        if not self.ensure_output_port_open():
             return
         self.start_send_worker(
             messages,
@@ -2952,8 +4543,7 @@ class MainWindow:
         if len(indices) != 1:
             messagebox.showinfo("Select one program", "Select exactly one program to send to the edit buffer.")
             return
-        if not self.engine3_output_ready():
-            messagebox.showwarning("No MIDI OUT", "Select a MIDI OUT port first.")
+        if not self.ensure_output_port_open():
             return
         index = indices[0]
         slot = self.bank.slots[index]
@@ -2971,8 +4561,8 @@ class MainWindow:
         self.append_log(
             log_line(
                 "Preparing buffer send: "
-                f"source slot={map_slot(index).bank_slot_text} "
-                f"program={slot.name or 'Empty'} header={format_hex(raw[6:8])} Bytes={len(raw)}"
+                f"slot {map_slot(index).bank_slot_text}, "
+                f"patch '{slot.name or 'Empty'}', command 0x{raw[6]:02X}, {len(raw)} bytes."
             )
         )
         self.start_send_worker_with_callbacks(
@@ -3053,6 +4643,7 @@ class MainWindow:
 
     def update_status(self) -> None:
         ports_open = "connected" if self.receiver.is_open else "not connected"
+        self.update_midi_monitor_status()
         self.status_var.set(
             f"MIDI: {ports_open} | Last action: {self.listen_status_var.get() or 'idle'}"
         )
@@ -3128,6 +4719,11 @@ class MainWindow:
         self.settings["colorize_log"] = self.colorize_log_var.get()
         self.settings["debug_logging"] = self.debug_logging_var.get()
         self.settings["show_details"] = self.show_details_var.get()
+        self.settings["case_sensitive_search"] = self.case_sensitive_search_var.get()
+        self.settings["monitor_enabled"] = self.monitor_enabled_var.get()
+        self.settings["monitor_show_technical"] = self.monitor_show_technical_var.get()
+        self.settings["monitor_hide_cc63"] = self.monitor_hide_cc63_var.get()
+        self.settings["midi_monitor_profile_id"] = self.current_midi_profile().profile_id
 
     def save_settings_from_tab(self) -> None:
         self._collect_settings()
@@ -3159,14 +4755,18 @@ class MainWindow:
     @staticmethod
     def log_tag_for(text: str) -> str | None:
         lowered = text.lower()
-        if "error" in lowered or "failed" in lowered or "timeout" in lowered:
-            return "error"
-        if "warning" in lowered or "blocked" in lowered:
+        if lowered.startswith("warning:") or " warning:" in lowered or "blocked" in lowered:
             return "warning"
+        if lowered.startswith("tx ") or "preparing send:" in lowered or "preparing buffer send:" in lowered or "sent sysex" in lowered:
+            return "tx"
+        if lowered.startswith("error:") or " failed:" in lowered or lowered.startswith("dump failed:"):
+            return "error"
+        if "request current timeout" in lowered or "request slot timeout" in lowered:
+            return "error"
+        if "capture completed after" in lowered or "dump received successfully" in lowered:
+            return "ok"
         if "ack" in lowered or " ok" in lowered or "completed" in lowered or "sent to xd" in lowered:
             return "ok"
-        if "tx" in lowered or "sent sysex" in lowered or "preparing send" in lowered:
-            return "tx"
         if "rx" in lowered or "received" in lowered:
             return "rx"
         if "debug" in lowered or "summary" in lowered or "settings:" in lowered:

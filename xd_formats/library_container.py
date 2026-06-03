@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -16,40 +17,38 @@ from .validators import validate_product, validate_prog_bin
 def load_mnlgxdlib(path: Path | str) -> XDLibrary:
     source_path = Path(path)
     with zipfile.ZipFile(source_path) as archive:
-        root = ET.fromstring(archive.read("FileInformation.xml"))
-        validate_product(root)
-        contents = root.find("Contents")
-        if contents is None:
-            raise ValueError("No Contents entry found")
-
         programs: list[XDProgram] = []
         referenced_files = {"FileInformation.xml"}
-        for index, program_data in enumerate(contents.findall("ProgramData")):
-            info_name = program_data.findtext("Information", default=f"Prog_{index:03d}.prog_info")
-            bin_name = program_data.findtext("ProgramBinary", default=f"Prog_{index:03d}.prog_bin")
-            prog_bin = archive.read(bin_name)
-            validate_prog_bin(prog_bin)
-            prog_info_xml = archive.read(info_name).decode("utf-8", errors="replace")
-            referenced_files.update({info_name, bin_name})
-            programs.append(
-                XDProgram(
-                    slot_index=index,
-                    name=read_program_name(prog_bin),
-                    prog_bin=prog_bin,
-                    prog_info_xml=prog_info_xml,
-                    source_path=source_path,
-                    source_type="mnlgxdlib",
-                )
-            )
-
         favorite_data = None
-        favorite_file = contents.findtext("./FavoriteData/File")
-        if favorite_file:
-            favorite_data = archive.read(favorite_file)
-            referenced_files.add(favorite_file)
+        tune_scale_data: dict[str, bytes] = {}
+        tune_oct_data: dict[str, bytes] = {}
+        try:
+            root = ET.fromstring(archive.read("FileInformation.xml"))
+            validate_product(root)
+            contents = root.find("Contents")
+        except (KeyError, ET.ParseError):
+            contents = None
+        if contents is not None:
+            for index, program_data in enumerate(contents.findall("ProgramData")):
+                info_name = program_data.findtext("Information", default=f"Prog_{index:03d}.prog_info")
+                bin_name = program_data.findtext("ProgramBinary", default=f"Prog_{index:03d}.prog_bin")
+                programs.append(_read_program_entry(archive, source_path, index, bin_name, info_name))
+                referenced_files.update({info_name, bin_name})
 
-        tune_scale_data = _read_tune_files(archive, contents, "TuneScaleData", "TuneScaleBinary", referenced_files)
-        tune_oct_data = _read_tune_files(archive, contents, "TuneOctData", "TuneOctBinary", referenced_files)
+            favorite_file = contents.findtext("./FavoriteData/File")
+            if favorite_file:
+                favorite_data = archive.read(favorite_file)
+                referenced_files.add(favorite_file)
+
+            tune_scale_data = _read_tune_files(archive, contents, "TuneScaleData", "TuneScaleBinary", referenced_files)
+            tune_oct_data = _read_tune_files(archive, contents, "TuneOctData", "TuneOctBinary", referenced_files)
+        else:
+            for index, bin_name in enumerate(_sorted_prog_bin_names(archive.namelist())):
+                info_name = bin_name[:-8] + "prog_info" if bin_name.lower().endswith("prog_bin") else f"Prog_{index:03d}.prog_info"
+                programs.append(_read_program_entry(archive, source_path, index, bin_name, info_name))
+                referenced_files.update({info_name, bin_name})
+        if not programs:
+            raise ValueError("No *.prog_bin entries found")
         extra_files = {
             name: archive.read(name)
             for name in archive.namelist()
@@ -64,6 +63,43 @@ def load_mnlgxdlib(path: Path | str) -> XDLibrary:
         extra_files=extra_files,
         source_path=source_path,
     )
+
+
+def _read_program_entry(
+    archive: zipfile.ZipFile,
+    source_path: Path,
+    index: int,
+    bin_name: str,
+    info_name: str,
+) -> XDProgram:
+    prog_bin = archive.read(bin_name)
+    validate_prog_bin(prog_bin)
+    try:
+        prog_info_xml = archive.read(info_name).decode("utf-8", errors="replace")
+    except KeyError:
+        prog_info_xml = DEFAULT_PROG_INFO_XML
+    return XDProgram(
+        slot_index=index,
+        name=read_program_name(prog_bin),
+        prog_bin=prog_bin,
+        prog_info_xml=prog_info_xml,
+        source_path=source_path,
+        source_type="mnlgxdlib",
+    )
+
+
+def _sorted_prog_bin_names(names: list[str]) -> list[str]:
+    return sorted(
+        [name for name in names if name.lower().endswith(".prog_bin")],
+        key=_prog_bin_sort_key,
+    )
+
+
+def _prog_bin_sort_key(name: str) -> tuple[int, str]:
+    match = re.search(r"Prog_(\d+)\.prog_bin$", name, re.IGNORECASE)
+    if match:
+        return int(match.group(1)), name.casefold()
+    return 10_000, name.casefold()
 
 
 def save_mnlgxdlib(library: XDLibrary, path: Path | str, *, fill_missing: bool = False) -> None:

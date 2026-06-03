@@ -19,7 +19,7 @@ from .validators import validate_product, validate_prog_bin
 def read_program_name(prog_bin: bytes) -> str:
     validate_prog_bin(prog_bin)
     raw = prog_bin[PROGRAM_NAME_OFFSET : PROGRAM_NAME_OFFSET + PROGRAM_NAME_LENGTH]
-    return raw.decode("latin-1", errors="replace").rstrip(" \x00")
+    return "".join(chr(value) for value in raw if 32 <= value <= 126).strip()
 
 
 def write_program_name(prog_bin: bytes, new_name: str) -> bytes:
@@ -34,16 +34,27 @@ def write_program_name(prog_bin: bytes, new_name: str) -> bytes:
 def load_mnlgxdprog(path: Path | str) -> XDProgram:
     source_path = Path(path)
     with zipfile.ZipFile(source_path) as archive:
-        root = ET.fromstring(archive.read("FileInformation.xml"))
-        validate_product(root)
-        program_data = root.find("./Contents/ProgramData")
-        if program_data is None:
-            raise ValueError("No ProgramData entry found")
-        info_name = program_data.findtext("Information", default="Prog_000.prog_info")
-        bin_name = program_data.findtext("ProgramBinary", default="Prog_000.prog_bin")
+        try:
+            root = ET.fromstring(archive.read("FileInformation.xml"))
+            validate_product(root)
+            program_data = root.find("./Contents/ProgramData")
+        except (KeyError, ET.ParseError):
+            program_data = None
+        if program_data is not None:
+            info_name = program_data.findtext("Information", default="Prog_000.prog_info")
+            bin_name = program_data.findtext("ProgramBinary", default="Prog_000.prog_bin")
+        else:
+            prog_bins = sorted(name for name in archive.namelist() if name.lower().endswith(".prog_bin"))
+            if not prog_bins:
+                raise ValueError("No *.prog_bin entry found")
+            bin_name = prog_bins[0]
+            info_name = bin_name[:-8] + "prog_info" if bin_name.lower().endswith("prog_bin") else "Prog_000.prog_info"
         prog_bin = archive.read(bin_name)
         validate_prog_bin(prog_bin)
-        prog_info_xml = archive.read(info_name).decode("utf-8", errors="replace")
+        try:
+            prog_info_xml = archive.read(info_name).decode("utf-8", errors="replace")
+        except KeyError:
+            prog_info_xml = DEFAULT_PROG_INFO_XML
 
     return XDProgram(
         slot_index=0,

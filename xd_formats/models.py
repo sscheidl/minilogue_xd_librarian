@@ -57,4 +57,5 @@ class XDUnit:
     payload_signature: str
     manifest: dict
     source_path: Path | None = None
+    payload_name: str = ""
     warnings: list[str] = field(default_factory=list)

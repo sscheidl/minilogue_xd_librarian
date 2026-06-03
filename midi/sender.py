@@ -39,7 +39,9 @@ class MidiSender:
         progress: ProgressCallback | None = None,
     ) -> int:
         if self.output_port is None:
-            raise RuntimeError("No MIDI OUT port is open.")
+            raise RuntimeError(
+                "No MIDI OUT port is open. Open a MIDI OUT port in the Transfer tab before sending data to the Minilogue XD."
+            )
 
         sent = 0
         total = len(messages)

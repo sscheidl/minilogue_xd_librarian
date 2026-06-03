@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .constants import PROGRAM_SIZE, SYSEX_ADDINFO_DUMP_LENGTH, SYSEX_HEADER_PREFIX, SYSEX_PROGRAM_DUMP_LENGTH
+from .constants import (
+    KORG_MANUFACTURER_ID,
+    PROGRAM_SIZE,
+    SYSEX_ADDINFO_DUMP_LENGTH,
+    SYSEX_HEADER_PREFIX,
+    SYSEX_PROGRAM_DUMP_LENGTH,
+)
 from .models import XDProgram
 from .program_container import read_program_name
 from .validators import validate_prog_bin
@@ -80,6 +86,29 @@ def decode_program_dump(message: bytes) -> XDProgram:
     )
 
 
+def decode_current_program_dump(message: bytes) -> XDProgram:
+    if len(message) < 9:
+        raise ValueError(f"Unexpected current program dump length: {len(message)}")
+    if (
+        message[0] != 0xF0
+        or message[1] != KORG_MANUFACTURER_ID
+        or message[3:6] != bytes([0x00, 0x01, 0x51])
+        or message[6] != 0x40
+        or message[-1] != 0xF7
+    ):
+        raise ValueError("Unsupported current program dump header")
+    prog_bin = decode_7bit_packed(message[7:-1])
+    if len(prog_bin) != PROGRAM_SIZE:
+        raise ValueError(f"Decoded current program size mismatch: {len(prog_bin)}")
+    validate_prog_bin(prog_bin)
+    return XDProgram(
+        slot_index=None,
+        name=read_program_name(prog_bin),
+        prog_bin=prog_bin,
+        source_type="syx-current",
+    )
+
+
 def encode_program_dump(program: XDProgram, slot_index: int | None = None) -> bytes:
     validate_prog_bin(program.prog_bin)
     slot = program.slot_index if slot_index is None else slot_index
@@ -90,17 +119,43 @@ def encode_program_dump(program: XDProgram, slot_index: int | None = None) -> by
     return bytes(SYSEX_HEADER_PREFIX) + bytes([slot & 0x7F, (slot >> 7) & 0x7F]) + encode_7bit_packed(program.prog_bin) + b"\xF7"
 
 
+def encode_current_program_dump(program: XDProgram) -> bytes:
+    """Encode a program for the minilogue xd current/edit buffer."""
+    validate_prog_bin(program.prog_bin)
+    header = bytes([0xF0, KORG_MANUFACTURER_ID, 0x30, 0x00, 0x01, 0x51, 0x40])
+    return header + encode_7bit_packed(program.prog_bin) + b"\xF7"
+
+
 def import_sysex_programs(path: Path | str) -> list[XDProgram]:
     source_path = Path(path)
+    programs = import_sysex_programs_from_bytes(source_path.read_bytes())
+    for program in programs:
+        program.source_path = source_path
+    return programs
+
+
+def import_sysex_programs_from_bytes(raw: bytes) -> list[XDProgram]:
     programs: list[XDProgram] = []
-    for message in split_sysex_stream_ignoring_realtime(source_path.read_bytes()):
+    for message in split_sysex_stream_ignoring_realtime(raw):
+        if len(message) <= 6 or message[6] != 0x4C:
+            continue
         try:
             program = decode_program_dump(message)
         except ValueError:
             continue
-        program.source_path = source_path
         programs.append(program)
     return programs
+
+
+def import_current_program_from_bytes(raw: bytes) -> XDProgram | None:
+    for message in split_sysex_stream_ignoring_realtime(raw):
+        if len(message) <= 6 or message[6] != 0x40:
+            continue
+        try:
+            return decode_current_program_dump(message)
+        except ValueError:
+            continue
+    return None
 
 
 def write_sysex_programs(programs: list[XDProgram], path: Path | str) -> None:

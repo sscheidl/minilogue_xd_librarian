@@ -1,0 +1,607 @@
+{
+  "profile_id": "generic_midi",
+  "display_name": "Generic MIDI",
+  "manufacturer": "Generic",
+  "device": "General MIDI Device",
+  "midi_channel_base": 1,
+  "notes": "Based on MIDI 1.0 Control Change Messages and the General MIDI Level 1 compatibility model. This profile names standard controllers and channel mode messages without assuming synth-specific behavior.",
+  "event_names": {
+    "active_sensing": "Active Sensing",
+    "aftertouch": "Channel Pressure",
+    "clock": "Clock",
+    "continue": "Continue",
+    "control_change": "Control Change",
+    "note_off": "Note Off",
+    "note_on": "Note On",
+    "pitchwheel": "Pitch Bend",
+    "polytouch": "Poly Aftertouch",
+    "program_change": "Program Change",
+    "reset": "System Reset",
+    "start": "Start",
+    "stop": "Stop",
+    "sysex": "SysEx Summary"
+  },
+  "program_mapping": {
+    "program_count": null,
+    "display_base": 1,
+    "uses_bank_select": true,
+    "bank_select": {
+      "msb_cc": 0,
+      "lsb_cc": 32
+    },
+    "banks": []
+  },
+  "control_changes": {
+    "0": {
+      "name": "Bank Select (MSB)",
+      "group": "MIDI",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "1": {
+      "name": "Modulation Wheel",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "2": {
+      "name": "Breath Controller",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "4": {
+      "name": "Foot Controller",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "5": {
+      "name": "Portamento Time",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "6": {
+      "name": "Data Entry (MSB)",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "7": {
+      "name": "Channel Volume",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "8": {
+      "name": "Balance",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "10": {
+      "name": "Pan",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "11": {
+      "name": "Expression Controller",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "12": {
+      "name": "Effect Control 1",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "13": {
+      "name": "Effect Control 2",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "16": {
+      "name": "General Purpose Controller 1",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "17": {
+      "name": "General Purpose Controller 2",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "18": {
+      "name": "General Purpose Controller 3",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "19": {
+      "name": "General Purpose Controller 4",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "32": {
+      "name": "Bank Select (LSB)",
+      "group": "MIDI",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "33": {
+      "name": "Modulation Wheel (LSB)",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "34": {
+      "name": "Breath Controller (LSB)",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "36": {
+      "name": "Foot Controller (LSB)",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "37": {
+      "name": "Portamento Time (LSB)",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "38": {
+      "name": "Data Entry (LSB)",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "39": {
+      "name": "Channel Volume (LSB)",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "40": {
+      "name": "Balance (LSB)",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "42": {
+      "name": "Pan (LSB)",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "43": {
+      "name": "Expression Controller (LSB)",
+      "group": "Mixer",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "44": {
+      "name": "Effect Control 1 (LSB)",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "45": {
+      "name": "Effect Control 2 (LSB)",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "48": {
+      "name": "General Purpose Controller 1 (LSB)",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "49": {
+      "name": "General Purpose Controller 2 (LSB)",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "50": {
+      "name": "General Purpose Controller 3 (LSB)",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "51": {
+      "name": "General Purpose Controller 4 (LSB)",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "64": {
+      "name": "Damper Pedal",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "65": {
+      "name": "Portamento On/Off",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "66": {
+      "name": "Sostenuto",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "67": {
+      "name": "Soft Pedal",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "68": {
+      "name": "Legato Footswitch",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "69": {
+      "name": "Hold 2",
+      "group": "Switch",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "70": {
+      "name": "Sound Controller 1",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Sound Variation."
+    },
+    "71": {
+      "name": "Sound Controller 2",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Timbre or Harmonic Intensity."
+    },
+    "72": {
+      "name": "Sound Controller 3",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Release Time."
+    },
+    "73": {
+      "name": "Sound Controller 4",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Attack Time."
+    },
+    "74": {
+      "name": "Sound Controller 5",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Brightness."
+    },
+    "75": {
+      "name": "Sound Controller 6",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Decay Time."
+    },
+    "76": {
+      "name": "Sound Controller 7",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Vibrato Rate."
+    },
+    "77": {
+      "name": "Sound Controller 8",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Vibrato Depth."
+    },
+    "78": {
+      "name": "Sound Controller 9",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as Vibrato Delay."
+    },
+    "79": {
+      "name": "Sound Controller 10",
+      "group": "Sound Controllers",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "80": {
+      "name": "General Purpose Controller 5",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "81": {
+      "name": "General Purpose Controller 6",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "82": {
+      "name": "General Purpose Controller 7",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "83": {
+      "name": "General Purpose Controller 8",
+      "group": "General Purpose",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "84": {
+      "name": "Portamento Control",
+      "group": "Performance",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "88": {
+      "name": "High Resolution Velocity Prefix",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "91": {
+      "name": "Reverb Send Level",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "92": {
+      "name": "Tremolo Depth",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "93": {
+      "name": "Chorus Send Level",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "94": {
+      "name": "Celeste Depth",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127,
+      "notes": "Often used as detune depth."
+    },
+    "95": {
+      "name": "Phaser Depth",
+      "group": "Effects",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "96": {
+      "name": "Data Increment",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "97": {
+      "name": "Data Decrement",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "98": {
+      "name": "NRPN LSB",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "99": {
+      "name": "NRPN MSB",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "100": {
+      "name": "RPN LSB",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "101": {
+      "name": "RPN MSB",
+      "group": "Technical",
+      "type": "continuous",
+      "min": 0,
+      "max": 127
+    },
+    "120": {
+      "name": "All Sound Off",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "121": {
+      "name": "Reset All Controllers",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "122": {
+      "name": "Local Control",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 63], "label": "Off" },
+        { "range": [64, 127], "label": "On" }
+      ]
+    },
+    "123": {
+      "name": "All Notes Off",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "124": {
+      "name": "Omni Mode Off",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "125": {
+      "name": "Omni Mode On",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "126": {
+      "name": "Mono Mode On",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    },
+    "127": {
+      "name": "Poly Mode On",
+      "group": "Channel Mode",
+      "type": "switch",
+      "min": 0,
+      "max": 127,
+      "value_map": [
+        { "range": [0, 127], "label": "Command" }
+      ]
+    }
+  },
+  "special_controls": {}
+}

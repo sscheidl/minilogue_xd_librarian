@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import zipfile
 
-from xd_formats import import_sysex_programs, load_mnlgxdlib, load_mnlgxdprog, load_mnlgxdunit
+from devices.korg_minilogue_xd.logue_unit_header import (
+    COMPATIBILITY_UNKNOWN,
+    COMPATIBLE_WITH_XD,
+    INCOMPATIBLE_TARGET,
+    parse_logue_unit_header,
+)
+from xd_formats import import_sysex_programs, load_mnlgxdlib, load_mnlgxdprog
 
 
 COMPATIBLE = "compatible"
@@ -44,12 +50,31 @@ def validate_import_path(path: Path) -> ImportValidationResult:
                 return ImportValidationResult(path, "sysex-program-dump", COMPATIBLE, f"{len(programs)} XD program dump(s)", True)
             return ImportValidationResult(path, "sysex", UNKNOWN, "No verified XD program dump found", False)
         if suffix == ".mnlgxdunit":
-            unit = load_mnlgxdunit(path)
-            if unit.platform and unit.platform not in {"minilogue-xd", "logue-sdk"}:
-                return ImportValidationResult(path, "user-unit", INCOMPATIBLE, f"platform={unit.platform}", False)
-            if unit.warnings:
-                return ImportValidationResult(path, "user-unit", UNKNOWN, "; ".join(unit.warnings), False)
-            return ImportValidationResult(path, "user-unit", COMPATIBLE, f"{unit.module}: {unit.name}", False)
+            header = parse_logue_unit_header(path)
+            if header.compatibility == COMPATIBLE_WITH_XD:
+                return ImportValidationResult(
+                    path,
+                    "user-unit",
+                    COMPATIBLE,
+                    f"{header.unit_type}: {header.unit_name}",
+                    False,
+                )
+            if header.compatibility == INCOMPATIBLE_TARGET:
+                return ImportValidationResult(
+                    path,
+                    "user-unit",
+                    INCOMPATIBLE,
+                    f"platform={header.platform}",
+                    False,
+                )
+            status = UNKNOWN if header.compatibility == COMPATIBILITY_UNKNOWN else INCOMPATIBLE
+            return ImportValidationResult(
+                path,
+                "user-unit",
+                status,
+                "; ".join(header.notes) or header.compatibility,
+                False,
+            )
         return ImportValidationResult(path, "unknown", INCOMPATIBLE, f"Unsupported extension: {suffix or '<none>'}", False)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return ImportValidationResult(path, suffix.lstrip(".") or "unknown", INVALID, str(exc), False)

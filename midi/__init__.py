@@ -1,1 +1,1 @@
-"""MIDI helpers for the minilogue xd librarian prototype."""
+"""MIDI port, receiver, SysEx request and buffer utilities."""
