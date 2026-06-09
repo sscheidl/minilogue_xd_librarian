@@ -1,6 +1,6 @@
 # Aktueller Stand - minilogue xd Librarian `v1.0.0`
 
-Stand: 2026-06-03  
+Stand: 2026-06-09
 Repository: `sscheidl/minilogue_xd_librarian`  
 Branch: `main`  
 Release: `v1.0.0`
@@ -67,8 +67,18 @@ Sicherheitsverhalten:
 ### 5. User-Unit- und xd-Format-Schicht erweitert
 
 - `.mnlgxdprog`, `.mnlgxdlib`, `.mnlgxdunit` und CleanDump-SysEx bleiben Teil des validierten Format-Layers.
-- User-Units werden konservativ inspiziert und angezeigt.
-- Transfer fuer User-Units bleibt absichtlich vorsichtig, bis das Verhalten am Geraet voll abgesichert ist.
+- User-Units werden konservativ validiert, inventarisiert und in festen Slots dargestellt.
+- Hardware-Inventar fuer User OSC / FX laeuft ueber den offiziellen `logue-cli probe`-Pfad.
+- Lokale Slot-Zuordnung mit Pending-State ist implementiert.
+- Hardware-Schreiben fuer User-Units ist jetzt konservativ ueber den offiziellen `logue-cli load` / `clear`-Pfad moeglich.
+- `Send ALL` schreibt nur tatsaechlich ausstehende OSC- bzw. FX-Aenderungen und fuehrt danach automatisch `Read from XD` aus.
+
+### 6. Multiengine-Analyse fuer Programmbanken
+
+- Nach dekodierten Programmbank-Dumps wird eine Multiengine-Analyse gefahren.
+- Sie ermittelt Programme, die User-OSC-Slots referenzieren.
+- Der Report wird als Textdatei gespeichert.
+- Wenn ein aktueller User-Unit-Inventarstand vorliegt, koennen Slotnamen im Report mit angezeigt werden.
 
 ## MIDI-Monitor-Architektur
 
@@ -97,6 +107,7 @@ Damit bleibt der Monitor selbst generisch, waehrend Synth-spezifische Details au
 - `0x0E` wird als globaler/diagnostischer Request behandelt und erwartet `0x51`
 - Full-bank receive bleibt sequentiell ueber `0x1C`-Slot-Requests mit `0x4C`-Antworten
 - Current- und Slot-Requests nutzen die validierte Trailing-`00`-Variante
+- User-Unit-Inventory und User-Unit-Writes nutzen die offizielle `logue-cli`-Toolchain statt experimenteller Roh-SysEx-Kommandos
 
 ## GUI-Stand
 
@@ -117,6 +128,14 @@ Der MIDI-Monitor bietet jetzt:
 - einfache und technische Sicht
 - Copy/Export nach Text und CSV
 
+User OSC / User FX bieten jetzt:
+
+- `Read from XD`
+- `Details`
+- `Send to XD`
+- `Send ALL`
+- automatische Inventar-Auffrischung nach erfolgreichem Write
+
 ## Validierung
 
 Fuer diesen Release-Stand erfolgreich gelaufen:
@@ -127,7 +146,7 @@ python -m pytest -q
 
 Ergebnis:
 
-- `130 passed, 21 subtests passed`
+- `176 passed, 21 subtests passed`
 
 Abgedeckte Bereiche umfassen unter anderem:
 
@@ -137,18 +156,21 @@ Abgedeckte Bereiche umfassen unter anderem:
 - GUI-Monitor-Workflow
 - Pocket-MIDI-Import
 - User-Units
+- Multiengine-Analyse
 - xd-Format-Import/Export
 
 ## Bekannte Grenzen
 
 - Das Tool ist kein vollstaendiger Parameter-Editor.
 - User-Unit-Senden bleibt konservativ bzw. eingeschraenkt.
+- Batch-Send fuer User-Units stoppt aktuell beim ersten Fehler.
+- Der explizite sequentielle `Read All from XD`-Pfad fuer 500 Programme existiert, ist aber noch nicht als voll ausgebauter robuster Hauptworkflow eingefroren.
 - Der generische MIDI-Monitor ist datengetrieben, aber die Qualitaet einzelner Profile haengt von den gepflegten JSON-Definitionen ab.
 - Weitere Synth-Profile muessen noch als eigene JSON-Dateien ergaenzt werden, wenn der universelle Monitor breiter genutzt werden soll.
 
 ## Empfohlene naechste Schritte
 
-1. Weitere Synth-Profile in `resources/midi_profiles/` aufnehmen.
-2. Profile gegen echte Hardware-Mitschnitte pruefen.
-3. User-Unit-Transferpfad nur nach verifizierter Hardware-Rueckmeldung erweitern.
+1. Den sequentiellen `Read All from XD`-Workflow fuer 500 Programme gezielt gegen echte Hardware und Fehlerfaelle haerten.
+2. Weitere Synth-Profile in `resources/midi_profiles/` aufnehmen.
+3. Profile gegen echte Hardware-Mitschnitte pruefen.
 4. Falls gewuenscht, spaeter einen echten generischen Multi-Synth-Monitor als eigenes Produkt aus dem Profilsystem herausziehen.

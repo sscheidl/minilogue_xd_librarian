@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import threading
 import tempfile
 import time
@@ -10,6 +12,8 @@ from unittest.mock import Mock, patch
 
 from app.main_window import MainWindow
 from app.version import APP_VERSION
+from devices.korg_minilogue_xd.user_unit_inventory import UserUnitInventorySnapshot, UserUnitSlotInfo
+from devices.korg_minilogue_xd.unit_types import UnitModule
 from midi.capture_events import RawCaptureEvent
 from midi.receiver import QueuedMidiMessage
 from librarian.models import SysexRecord
@@ -94,6 +98,30 @@ class FakeNativeCaptureWorker:
         return True
 
 
+class FakeLogueCliTransport:
+    calls = []
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def cancel(self):
+        return None
+
+    def resolve_port_indices(self, input_name, output_name):
+        type(self).calls.append(("resolve", input_name, output_name))
+        return 2, 2
+
+    def load_unit_archive(self, unit_path, *, slot_index, input_index, output_index):
+        type(self).calls.append(
+            ("load", Path(unit_path).name, slot_index, input_index, output_index)
+        )
+        return "Load completed."
+
+    def clear_slot(self, module, *, slot_index, input_index, output_index):
+        type(self).calls.append(("clear", module, slot_index, input_index, output_index))
+        return "Clear completed."
+
+
 def wait_for_tk(root, predicate, timeout=1.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -132,7 +160,15 @@ class MainWindowWorkflowTest(unittest.TestCase):
         self.addCleanup(user_data_patcher.stop)
         self.addCleanup(user_units_patcher.stop)
 
-        root = tk.Tk()
+        python_root = Path(sys.executable).resolve().parent
+        os.environ["TCL_LIBRARY"] = (python_root / "tcl" / "tcl8.6").as_posix()
+        os.environ["TK_LIBRARY"] = (python_root / "tcl" / "tk8.6").as_posix()
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            os.environ["TCL_LIBRARY"] = (python_root / "tcl" / "tcl8.6").as_posix()
+            os.environ["TK_LIBRARY"] = (python_root / "tcl" / "tk8.6").as_posix()
+            root = tk.Tk()
         root.withdraw()
         startup_detection_patcher = patch(
             "app.main_window.MainWindow.start_background_port_detection",
@@ -244,6 +280,7 @@ class MainWindowWorkflowTest(unittest.TestCase):
         self.assertNotIn("MIDI IN", transfer_text)
         self.assertNotIn("Import Program/Library", transfer_text)
         self.assertNotIn("Send Selected to XD", transfer_text)
+        self.assertIn("Inactivity finalize", self.widget_texts(window.settings_tab))
         self.assertIn("Double-click program to send selected preset", self.widget_texts(window.settings_tab))
 
     def test_bank_view_has_play_preset_button_and_context_entry(self):
@@ -650,13 +687,33 @@ class MainWindowWorkflowTest(unittest.TestCase):
             {key: len(tree.get_children()) for key, tree in window.user_fx_trees.items()},
             {"modfx": 16, "delfx": 8, "revfx": 8},
         )
-        self.assertNotIn("Library", [values[0] for values in osc_values + fx_values])
         self.assertEqual(
             tuple(next(iter(window.user_fx_trees.values()))["columns"]),
-            ("slot", "name", "type", "compatibility", "status"),
+            ("slot", "name", "version"),
         )
+        self.assertNotIn("file:", " ".join(window.user_osc_tree.get_children()))
 
-    def test_user_unit_tree_shows_unassigned_local_files(self):
+    def test_user_unit_tabs_show_read_button_without_refresh(self):
+        window = self.make_window()
+
+        self.assertIn("Read from XD", self.widget_texts(window.user_osc_tab))
+        self.assertIn("Read from XD", self.widget_texts(window.user_fx_tab))
+        self.assertIn("Details", self.widget_texts(window.user_osc_tab))
+        self.assertIn("Details", self.widget_texts(window.user_fx_tab))
+        self.assertIn("Send to XD", self.widget_texts(window.user_osc_tab))
+        self.assertIn("Send to XD", self.widget_texts(window.user_fx_tab))
+        self.assertIn("Send ALL", self.widget_texts(window.user_osc_tab))
+        self.assertIn("Send ALL", self.widget_texts(window.user_fx_tab))
+        self.assertNotIn("Refresh", self.widget_texts(window.user_osc_tab))
+        self.assertNotIn("Refresh", self.widget_texts(window.user_fx_tab))
+        self.assertIn("MOD", self.widget_texts(window.user_fx_tab))
+        self.assertIn("DELAY", self.widget_texts(window.user_fx_tab))
+        self.assertIn("REVERB", self.widget_texts(window.user_fx_tab))
+        self.assertNotIn("MOD FX", self.widget_texts(window.user_fx_tab))
+        self.assertNotIn("DELAY FX", self.widget_texts(window.user_fx_tab))
+        self.assertNotIn("REVERB FX", self.widget_texts(window.user_fx_tab))
+
+    def test_import_user_unit_refuses_wrong_target_slot_type(self):
         manifest = {
             "header": {
                 "platform": "minilogue-xd",
@@ -669,25 +726,47 @@ class MainWindowWorkflowTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            library_dir = temp_path / "user_units"
-            library_dir.mkdir()
-            write_user_unit_archive(library_dir / "cloud.mnlgxdunit", manifest, b"UREVpayload")
-            window = self.make_window(temp_path=temp_path, library_dir=library_dir)
-            file_row = window.user_fx_trees["revfx"].item("file:cloud.mnlgxdunit", "values")
+            source = temp_path / "cloud.mnlgxdunit"
+            write_user_unit_archive(source, manifest, b"UREVpayload")
+            window = self.make_window(temp_path=temp_path, library_dir=temp_path / "user_units")
+            window.user_osc_tree.selection_set(["osc-01"])
 
-        self.assertEqual(file_row[0], "Local file")
-        self.assertEqual(file_row[1], "Cloud Verb")
-        self.assertEqual(file_row[2], "revfx")
-        self.assertEqual(file_row[4], "unassigned local file")
-        self.assertIn("Unassigned FX files: 1.", window.user_fx_status_var.get())
+            with (
+                patch("app.main_window.filedialog.askopenfilename", return_value=str(source)),
+                patch("app.main_window.messagebox.showerror") as showerror,
+            ):
+                window.import_user_units()
 
-    def test_move_selected_unassigned_user_unit_file_assigns_slot(self):
+        showerror.assert_called_once()
+        self.assertIsNone(window.user_unit_workspace.slot_state("osc-01").pending_assignment)
+
+    def test_load_selected_user_unit_slot_routes_expected_module(self):
+        window = self.make_window()
+        window.user_fx_trees["delfx"].selection_set(["delfx-03"])
+
+        with patch.object(window, "activate_unit_slot") as activate:
+            window.load_replace_selected_user_unit_slot()
+
+        activate.assert_called_once_with(module=UnitModule.DELAY_FX, slot_index=2)
+
+    def test_user_unit_tree_double_click_invokes_slot_activation(self):
+        window = self.make_window()
+        tree = window.user_fx_trees["revfx"]
+        tree.identify_row = Mock(return_value="revfx-02")
+
+        with patch.object(window, "load_replace_selected_user_unit_slot") as load:
+            window.on_user_unit_tree_double_click(Mock(widget=tree, y=0))
+
+        self.assertEqual(tree.selection(), ("revfx-02",))
+        load.assert_called_once()
+
+    def test_hardware_and_local_assignment_remain_distinct(self):
         manifest = {
             "header": {
                 "platform": "minilogue-xd",
                 "module": "osc",
                 "api": "1.0-0",
-                "version": "1.0",
+                "version": "1.0-0",
                 "name": "Bright OSC",
                 "params": [],
             }
@@ -698,18 +777,476 @@ class MainWindowWorkflowTest(unittest.TestCase):
             library_dir.mkdir()
             write_user_unit_archive(library_dir / "bright.mnlgxdunit", manifest, b"UOSCpayload")
             window = self.make_window(temp_path=temp_path, library_dir=library_dir)
-            window.user_osc_tree.selection_set(["file:bright.mnlgxdunit"])
+            result = window.user_unit_validator.validate_for_destination(
+                path=library_dir / "bright.mnlgxdunit",
+                destination_module=UnitModule.OSC,
+                destination_slot=0,
+            )
+            self.assertTrue(result.ok)
+            self.assertIsNotNone(result.unit)
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.OSC,
+                slot_index=0,
+                unit=result.unit,
+            )
+            window.user_unit_slot_inventory["osc-01"] = UserUnitSlotInfo(
+                module="osc",
+                category="User OSC",
+                slot_key="osc-01",
+                slot_index=1,
+                occupied=False,
+                status="Empty",
+                display_name=None,
+                unit_name=None,
+                unit_version=None,
+                api_version=None,
+                sdk_version=None,
+                developer_id=None,
+                unit_id=None,
+                target_platform="minilogue xd",
+                compatibility=None,
+                payload_size=None,
+                checksum=None,
+                source="hardware_inventory",
+                raw_metadata=b"[0]: free.",
+                raw_protocol_command="logue-cli probe -m osc -i 2 -o 2",
+                raw_metadata_length=10,
+                read_timestamp="2026-06-07 17:00:00 CEST",
+                device_name="minilogue xd",
+                system_version="2.10",
+                logue_api_version="1.01-0",
+            )
+            window.user_unit_workspace.set_hardware_inventory(window.user_unit_slot_inventory)
+            window.refresh_user_units_trees()
+            row = window.user_osc_tree.item("osc-01", "values")
+            title, content = window.build_user_unit_details_dialog("osc-01")
 
-            with patch("app.main_window.simpledialog.askstring", return_value="osc-03"):
-                window.move_selected_user_unit_assignment()
+        self.assertIsNotNone(window.user_unit_workspace.slot_state("osc-01").pending_assignment)
+        self.assertEqual(row, ("User OSC 01", "Empty", "1.0-0"))
+        self.assertEqual(title, "User OSC Details - Slot 01")
+        self.assertIn("Hardware inventory", content)
+        self.assertIn("Pending Local Assignment", content)
+        pending_name = window.user_unit_workspace.slot_state("osc-01").pending_assignment.source_path.name
+        self.assertIn(pending_name, content)
 
-            assigned_row = window.user_osc_tree.item("osc-03", "values")
+    def test_inventory_read_clears_matching_pending_assignment(self):
+        manifest = {
+            "header": {
+                "platform": "minilogue-xd",
+                "module": "osc",
+                "api": "1.0-0",
+                "version": "1.1-0",
+                "name": "HUMN",
+                "params": [],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            library_dir = temp_path / "user_units"
+            library_dir.mkdir()
+            source = temp_path / "humn.mnlgxdunit"
+            write_user_unit_archive(source, manifest, b"UOSCpayload")
+            window = self.make_window(temp_path=temp_path, library_dir=library_dir)
+            result = window.user_unit_validator.validate_for_destination(
+                path=source,
+                destination_module=UnitModule.OSC,
+                destination_slot=15,
+            )
+            self.assertTrue(result.ok)
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.OSC,
+                slot_index=15,
+                unit=result.unit,
+            )
+            snapshot = UserUnitInventorySnapshot(
+                input_port_name="minilogue xd SOUND",
+                output_port_name="minilogue xd SOUND",
+                device_name="minilogue xd",
+                system_version="2.10",
+                logue_api_version="1.01-0",
+                read_timestamp="2026-06-09T12:00:00+00:00",
+                module_info={},
+                slots={
+                    "osc-16": UserUnitSlotInfo(
+                        module="osc",
+                        category="User OSC",
+                        slot_key="osc-16",
+                        slot_index=16,
+                        occupied=True,
+                        status="Installed",
+                        display_name="HUMN",
+                        unit_name="HUMN",
+                        unit_version="1.1-0",
+                        api_version="1.0-0",
+                        sdk_version=None,
+                        developer_id="00000000",
+                        unit_id="00000000",
+                        target_platform="minilogue xd",
+                        compatibility="Unknown",
+                        payload_size=None,
+                        checksum=None,
+                        source="hardware_inventory",
+                        raw_metadata=b'[15]: "HUMN" v1.1-0 api:1.0-0 did:00000000 uid:00000000',
+                        raw_protocol_command="logue-cli probe -m osc -i 2 -o 2",
+                        raw_metadata_length=60,
+                        read_timestamp="2026-06-09T12:00:00+00:00",
+                        device_name="minilogue xd",
+                        system_version="2.10",
+                        logue_api_version="1.01-0",
+                    )
+                },
+                warnings=(),
+            )
 
-        self.assertEqual(window.user_unit_assignments["osc-03"].filename, "bright.mnlgxdunit")
-        self.assertEqual(assigned_row[0], "User OSC 03")
-        self.assertEqual(assigned_row[1], "Bright OSC")
-        self.assertEqual(assigned_row[4], "local assignment; hardware status unknown")
-        self.assertNotIn("file:bright.mnlgxdunit", window.user_osc_tree.get_children())
+            window.finish_user_unit_inventory_success(snapshot)
+            row = window.user_osc_tree.item("osc-16", "values")
+
+        self.assertIsNone(window.user_unit_workspace.slot_state("osc-16").pending_assignment)
+        self.assertEqual(row, ("User OSC 16", "HUMN", "1.1-0"))
+        self.assertIn(
+            "Reconciled pending local User Unit state against current XD inventory.",
+            window.log_text.get("1.0", tk.END),
+        )
+
+    def test_details_popup_model_for_empty_slot(self):
+        window = self.make_window()
+        window.user_unit_slot_inventory["osc-01"] = UserUnitSlotInfo(
+            module="osc",
+            category="User OSC",
+            slot_key="osc-01",
+            slot_index=1,
+            occupied=False,
+            status="Empty",
+            display_name=None,
+            unit_name=None,
+            unit_version=None,
+            api_version=None,
+            sdk_version=None,
+            developer_id=None,
+            unit_id=None,
+            target_platform="minilogue xd",
+            compatibility=None,
+            payload_size=None,
+            checksum=None,
+            source="hardware_inventory",
+            raw_metadata=b"[0]: free.",
+            raw_protocol_command="logue-cli probe -m osc -i 2 -o 2",
+            raw_metadata_length=10,
+            read_timestamp="2026-06-07 17:00:00 CEST",
+            device_name="minilogue xd",
+            system_version="2.10",
+            logue_api_version="1.01-0",
+        )
+        window.user_unit_workspace.set_hardware_inventory(window.user_unit_slot_inventory)
+
+        title, content = window.build_user_unit_details_dialog("osc-01")
+
+        self.assertEqual(title, "User OSC Details - Slot 01")
+        self.assertIn("Status: Empty on XD", content)
+        self.assertIn("Read Source: minilogue xd via official logue-cli probe", content)
+        self.assertIn("Pending Local Assignment\nStatus: None", content)
+
+    def test_details_popup_model_for_installed_slot(self):
+        window = self.make_window()
+        window.user_unit_slot_inventory["modfx-07"] = UserUnitSlotInfo(
+            module="modfx",
+            category="Mod FX",
+            slot_key="modfx-07",
+            slot_index=7,
+            occupied=True,
+            status="Installed",
+            display_name="Hera 2",
+            unit_name="Hera 2",
+            unit_version="2.00-0",
+            api_version="1.01-0",
+            sdk_version=None,
+            developer_id="00000000",
+            unit_id="00000000",
+            target_platform="minilogue xd",
+            compatibility="Unknown",
+            payload_size=None,
+            checksum=None,
+            source="hardware_inventory",
+            raw_metadata=b'[6]: "Hera 2" v2.00-0 api:1.01-0 did:00000000 uid:00000000',
+            raw_protocol_command="logue-cli probe -m modfx -i 2 -o 2",
+            raw_metadata_length=64,
+            read_timestamp="2026-06-07 17:00:00 CEST",
+            device_name="minilogue xd",
+            system_version="2.10",
+            logue_api_version="1.01-0",
+        )
+        window.user_unit_workspace.set_hardware_inventory(window.user_unit_slot_inventory)
+
+        title, content = window.build_user_unit_details_dialog("modfx-07")
+
+        self.assertEqual(title, "Mod FX Details - Slot 07")
+        self.assertIn("Status: Installed on XD", content)
+        self.assertIn("Display Name: Hera 2", content)
+        self.assertIn("Developer ID: 00000000", content)
+
+    def test_fx_selection_overrides_stale_osc_selection_for_details(self):
+        window = self.make_window()
+        window.user_osc_tree.selection_set(["osc-01"])
+        window.user_osc_tree.focus("osc-01")
+        window.on_user_unit_tree_select(Mock(widget=window.user_osc_tree))
+        window.tabs.select(window.user_fx_tab)
+        fx_tree = window.user_fx_trees["modfx"]
+        fx_tree.selection_set(["modfx-07"])
+        fx_tree.focus("modfx-07")
+        window.on_user_unit_tree_select(Mock(widget=fx_tree))
+
+        self.assertEqual(window.selected_user_unit_slot_key(), "modfx-07")
+        self.assertEqual(window.user_osc_tree.selection(), ())
+        title, _content = window.build_user_unit_details_dialog("modfx-07")
+        self.assertEqual(title, "Mod FX Details - Slot 07")
+
+    def test_fx_selection_overrides_stale_osc_selection_for_load(self):
+        window = self.make_window()
+        window.user_osc_tree.selection_set(["osc-01"])
+        window.user_osc_tree.focus("osc-01")
+        window.on_user_unit_tree_select(Mock(widget=window.user_osc_tree))
+        window.tabs.select(window.user_fx_tab)
+        fx_tree = window.user_fx_trees["delfx"]
+        fx_tree.selection_set(["delfx-03"])
+        fx_tree.focus("delfx-03")
+        window.on_user_unit_tree_select(Mock(widget=fx_tree))
+
+        with patch.object(window, "activate_unit_slot") as activate:
+            window.load_replace_selected_user_unit_slot()
+
+        activate.assert_called_once_with(module=UnitModule.DELAY_FX, slot_index=2)
+
+    def test_send_selected_user_unit_to_xd_uses_logue_cli_load_and_clears_pending(self):
+        FakeLogueCliTransport.calls = []
+        manifest = {
+            "header": {
+                "platform": "minilogue-xd",
+                "module": "osc",
+                "api": "1.0-0",
+                "version": "1.2-3",
+                "name": "Bright OSC",
+                "params": [],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            library_dir = temp_path / "user_units"
+            library_dir.mkdir()
+            source = temp_path / "bright.mnlgxdunit"
+            write_user_unit_archive(source, manifest, b"UOSCpayload")
+            window = self.make_window(temp_path=temp_path, library_dir=library_dir)
+            result = window.user_unit_validator.validate_for_destination(
+                path=source,
+                destination_module=UnitModule.OSC,
+                destination_slot=0,
+            )
+            self.assertTrue(result.ok)
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.OSC,
+                slot_index=0,
+                unit=result.unit,
+            )
+            window.refresh_user_units_trees()
+            window.user_osc_tree.selection_set(["osc-01"])
+            window.input_port_var.set("minilogue xd SOUND")
+            window.output_port_var.set("minilogue xd SOUND")
+
+            with (
+                patch("app.main_window.LogueCliTransport", FakeLogueCliTransport),
+                patch("app.main_window.messagebox.askyesno", return_value=True),
+                patch.object(window, "schedule_after", side_effect=lambda _delay, callback: callback()),
+                patch.object(window, "read_user_unit_inventory_from_xd") as auto_read,
+                patch("app.main_window.messagebox.showwarning") as showwarning,
+            ):
+                window.send_selected_user_unit_to_xd()
+                wait_for_tk(window.root, lambda: not window.user_unit_write_in_progress)
+
+        self.assertEqual(
+            FakeLogueCliTransport.calls,
+            [
+                ("resolve", "minilogue xd SOUND", "minilogue xd SOUND"),
+                ("load", "bright.mnlgxdunit", 0, 2, 2),
+            ],
+        )
+        self.assertIsNone(window.user_unit_workspace.slot_state("osc-01").pending_assignment)
+        self.assertIn("Installed Bright OSC to User OSC 01 on XD.", window.log_text.get("1.0", tk.END))
+        auto_read.assert_called_once()
+        showwarning.assert_not_called()
+
+    def test_send_selected_user_unit_to_xd_uses_logue_cli_clear_for_pending_clear(self):
+        FakeLogueCliTransport.calls = []
+        window = self.make_window()
+        window.user_unit_workspace.mark_slot_for_clear(module=UnitModule.DELAY_FX, slot_index=2)
+        window.refresh_user_units_trees()
+        window.tabs.select(window.user_fx_tab)
+        tree = window.user_fx_trees["delfx"]
+        tree.selection_set(["delfx-03"])
+        tree.focus("delfx-03")
+        window.on_user_unit_tree_select(Mock(widget=tree))
+        window.input_port_var.set("minilogue xd SOUND")
+        window.output_port_var.set("minilogue xd SOUND")
+
+        with (
+            patch("app.main_window.LogueCliTransport", FakeLogueCliTransport),
+            patch("app.main_window.messagebox.askyesno", return_value=True),
+            patch.object(window, "schedule_after", side_effect=lambda _delay, callback: callback()),
+            patch.object(window, "read_user_unit_inventory_from_xd") as auto_read,
+            patch("app.main_window.messagebox.showwarning") as showwarning,
+        ):
+            window.send_selected_user_unit_to_xd()
+            wait_for_tk(window.root, lambda: not window.user_unit_write_in_progress)
+
+        self.assertEqual(
+            FakeLogueCliTransport.calls,
+            [
+                ("resolve", "minilogue xd SOUND", "minilogue xd SOUND"),
+                ("clear", "delfx", 2, 2, 2),
+            ],
+        )
+        state = window.user_unit_workspace.slot_state("delfx-03")
+        self.assertFalse(state.pending_clear)
+        self.assertIn("Cleared Delay FX 03 on XD.", window.log_text.get("1.0", tk.END))
+        auto_read.assert_called_once()
+        showwarning.assert_not_called()
+
+    def test_send_all_user_osc_to_xd_sends_only_pending_slots(self):
+        FakeLogueCliTransport.calls = []
+        manifest = {
+            "header": {
+                "platform": "minilogue-xd",
+                "module": "osc",
+                "api": "1.0-0",
+                "version": "1.2-3",
+                "name": "Bright OSC",
+                "params": [],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            library_dir = temp_path / "user_units"
+            library_dir.mkdir()
+            bright_source = temp_path / "bright.mnlgxdunit"
+            hum_source = temp_path / "hum.mnlgxdunit"
+            write_user_unit_archive(bright_source, manifest, b"UOSCpayloadA")
+            write_user_unit_archive(
+                hum_source,
+                {
+                    "header": {
+                        **manifest["header"],
+                        "version": "1.1-0",
+                        "name": "HUMN",
+                    }
+                },
+                b"UOSCpayloadB",
+            )
+            window = self.make_window(temp_path=temp_path, library_dir=library_dir)
+            bright_result = window.user_unit_validator.validate_for_destination(
+                path=bright_source,
+                destination_module=UnitModule.OSC,
+                destination_slot=0,
+            )
+            hum_result = window.user_unit_validator.validate_for_destination(
+                path=hum_source,
+                destination_module=UnitModule.OSC,
+                destination_slot=2,
+            )
+            self.assertTrue(bright_result.ok)
+            self.assertTrue(hum_result.ok)
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.OSC,
+                slot_index=0,
+                unit=bright_result.unit,
+            )
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.OSC,
+                slot_index=2,
+                unit=hum_result.unit,
+            )
+            window.refresh_user_units_trees()
+            window.input_port_var.set("minilogue xd SOUND")
+            window.output_port_var.set("minilogue xd SOUND")
+
+            with (
+                patch("app.main_window.LogueCliTransport", FakeLogueCliTransport),
+                patch("app.main_window.messagebox.askyesno", return_value=True),
+                patch.object(window, "schedule_after", side_effect=lambda _delay, callback: callback()),
+                patch.object(window, "read_user_unit_inventory_from_xd") as auto_read,
+                patch("app.main_window.messagebox.showwarning") as showwarning,
+            ):
+                window.send_all_user_osc_to_xd()
+                wait_for_tk(window.root, lambda: not window.user_unit_write_in_progress)
+
+        self.assertEqual(
+            FakeLogueCliTransport.calls,
+            [
+                ("resolve", "minilogue xd SOUND", "minilogue xd SOUND"),
+                ("load", "bright.mnlgxdunit", 0, 2, 2),
+                ("load", "hum.mnlgxdunit", 2, 2, 2),
+            ],
+        )
+        self.assertIsNone(window.user_unit_workspace.slot_state("osc-01").pending_assignment)
+        self.assertIsNone(window.user_unit_workspace.slot_state("osc-03").pending_assignment)
+        self.assertIn("Sent 2 User Unit change(s) to XD.", window.log_text.get("1.0", tk.END))
+        auto_read.assert_called_once()
+        showwarning.assert_not_called()
+
+    def test_send_all_user_fx_to_xd_sends_pending_fx_slots_and_auto_reads(self):
+        FakeLogueCliTransport.calls = []
+        manifest = {
+            "header": {
+                "platform": "minilogue-xd",
+                "module": "revfx",
+                "api": "1.0-0",
+                "version": "2.0-1",
+                "name": "Glow Verb",
+                "params": [],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            library_dir = temp_path / "user_units"
+            library_dir.mkdir()
+            source = temp_path / "glow.mnlgxdunit"
+            write_user_unit_archive(source, manifest, b"UREVpayload")
+            window = self.make_window(temp_path=temp_path, library_dir=library_dir)
+            result = window.user_unit_validator.validate_for_destination(
+                path=source,
+                destination_module=UnitModule.REVERB_FX,
+                destination_slot=0,
+            )
+            self.assertTrue(result.ok)
+            window.user_unit_workspace.mark_slot_for_clear(module=UnitModule.MOD_FX, slot_index=1)
+            window.user_unit_workspace.assign_pending(
+                module=UnitModule.REVERB_FX,
+                slot_index=0,
+                unit=result.unit,
+            )
+            window.refresh_user_units_trees()
+            window.input_port_var.set("minilogue xd SOUND")
+            window.output_port_var.set("minilogue xd SOUND")
+
+            with (
+                patch("app.main_window.LogueCliTransport", FakeLogueCliTransport),
+                patch("app.main_window.messagebox.askyesno", return_value=True),
+                patch.object(window, "schedule_after", side_effect=lambda _delay, callback: callback()),
+                patch.object(window, "read_user_unit_inventory_from_xd") as auto_read,
+                patch("app.main_window.messagebox.showwarning") as showwarning,
+            ):
+                window.send_all_user_fx_to_xd()
+                wait_for_tk(window.root, lambda: not window.user_unit_write_in_progress)
+
+        self.assertEqual(
+            FakeLogueCliTransport.calls,
+            [
+                ("resolve", "minilogue xd SOUND", "minilogue xd SOUND"),
+                ("clear", "modfx", 1, 2, 2),
+                ("load", "glow.mnlgxdunit", 0, 2, 2),
+            ],
+        )
+        self.assertFalse(window.user_unit_workspace.slot_state("modfx-02").pending_clear)
+        self.assertIsNone(window.user_unit_workspace.slot_state("revfx-01").pending_assignment)
+        auto_read.assert_called_once()
+        showwarning.assert_not_called()
 
     @staticmethod
     def make_program(name="LiveName", slot_index=1):
@@ -828,6 +1365,35 @@ class MainWindowWorkflowTest(unittest.TestCase):
         self.assertEqual(window.bank.slots[0].name, "SlotOne")
         self.assertEqual(window.bank.slots[9].name, "SlotTen")
         self.assertIn("Captured bank: 2/500 programs.", window.log_text.get("1.0", tk.END))
+
+    def test_bank_finalizer_writes_multiengine_report(self):
+        window = self.make_window()
+        window.receive_mode = "bank"
+        program = self.make_program("UserBass", 9)
+        prog_bin = bytearray(program.prog_bin)
+        prog_bin[38] = 2
+        prog_bin[41] = 3
+        program = XDProgram(slot_index=9, name="UserBass", prog_bin=bytes(prog_bin), source_type="test")
+        dumps_temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(dumps_temp_dir.cleanup)
+        dumps_path = Path(dumps_temp_dir.name)
+
+        with (
+            patch("app.main_window.dumps_dir", return_value=dumps_path),
+            patch("app.main_window.time.strftime", return_value="20260609_120000"),
+        ):
+            window.sysex_buffer.add_message(encode_program_dump(program, 9), time.time())
+            window.sysex_buffer.finalize("timeout", time.time())
+            window.finalize_bank_receive("timeout")
+
+        report_path = dumps_path / "multiengine_20260609_120000.txt"
+        self.assertTrue(report_path.exists())
+        content = report_path.read_text(encoding="utf-8")
+        self.assertIn("Source: Captured SysEx dump", content)
+        self.assertIn("Programs using User OSC: 1", content)
+        self.assertIn("User OSC 04", content)
+        self.assertIn("UserBass", content)
+        self.assertIn("Multiengine analysis: 1 programs use User OSC; report saved: multiengine_20260609_120000.txt", window.log_text.get("1.0", tk.END))
 
     def test_bank_finalizer_segment_without_programs_does_not_clear_existing_capture(self):
         window = self.make_window()

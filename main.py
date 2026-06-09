@@ -49,7 +49,8 @@ def configure_root(root: tk.Tk) -> None:
     root.title(WINDOW_TITLE)
     root.geometry(DEFAULT_WINDOW_GEOMETRY)
     root.minsize(*MIN_WINDOW_SIZE)
-    icon_path = Path(__file__).resolve().parent / "assets" / "icon.ico"
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    icon_path = bundle_root / "assets" / "icon.ico"
     if icon_path.exists():
         try:
             root.iconbitmap(str(icon_path))

@@ -15,7 +15,7 @@ import threading
 import time
 import tkinter as tk
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, scrolledtext, ttk
@@ -31,12 +31,31 @@ from app.app_paths import (
 )
 from app.version import APP_VERSION
 from devices.korg_minilogue_xd.slot_mapping import map_slot
+from devices.korg_minilogue_xd.multiengine_analysis import (
+    analyze_multiengine_refs,
+    report_text as multiengine_report_text,
+)
 from devices.korg_minilogue_xd.sysex import classify_xd_sysex, summarize_xd_sysex_stream
+from devices.korg_minilogue_xd.unit_types import UnitModule, slot_key_for
+from devices.korg_minilogue_xd.unit_validator import UserUnitValidator
+from devices.korg_minilogue_xd.unit_workspace import UserUnitWorkspace
+from devices.korg_minilogue_xd.user_unit_inventory import (
+    UserUnitInventoryReader,
+    UserUnitInventorySnapshot,
+    UserUnitSlotInfo,
+)
+from devices.korg_minilogue_xd.user_unit_transport import (
+    InventoryCancelledError,
+    InventoryTimeoutError,
+    LogueCliCommandError,
+    LogueCliNotFoundError,
+    LogueCliTransport,
+    PortResolutionError,
+)
 from devices.korg_minilogue_xd.user_units import (
     USER_FX_SLOTS,
     USER_OSC_SLOTS,
     USER_UNIT_SLOTS_BY_KEY,
-    matching_slots,
 )
 from librarian.bank_workspace import OfflineBank
 from librarian.models import STATUS_IMPORTED, STATUS_SYNCED, SysexRecord
@@ -50,15 +69,7 @@ from librarian.sysex_tools import (
     write_report_files,
 )
 from librarian.import_validation import COMPATIBLE, PROBABLY_COMPATIBLE, validate_import_path
-from librarian.user_units import (
-    UserUnitAssignment,
-    UserUnitFile,
-    first_available_slot_key,
-    import_user_unit,
-    load_user_unit_assignments,
-    save_user_unit_assignments,
-    scan_user_units,
-)
+from librarian.user_units import inspect_user_unit
 from midi.capture_events import RawCaptureEvent
 from midi.diagnostics import MidiMessageInfo, analyze_raw_message
 from midi.engine3_capture import Engine3SysexCaptureWorker
@@ -244,7 +255,28 @@ class MainWindow:
         self.current_bank_path: Path | None = None
         self.logo_image: tk.PhotoImage | None = None
         self.user_unit_assignment_path = user_data_dir() / "user_unit_slots.json"
-        self.user_unit_assignments = load_user_unit_assignments(self.user_unit_assignment_path)
+        self.user_unit_validator = UserUnitValidator()
+        self.user_unit_workspace = UserUnitWorkspace(
+            library_dir=user_units_dir(),
+            state_path=self.user_unit_assignment_path,
+            validator=self.user_unit_validator,
+        )
+        self.user_unit_slot_inventory: dict[str, UserUnitSlotInfo] = {}
+        self.user_unit_inventory_snapshot: UserUnitInventorySnapshot | None = None
+        self.user_unit_inventory_reader: UserUnitInventoryReader | None = None
+        self.user_unit_read_thread: threading.Thread | None = None
+        self.user_unit_inventory_reading = False
+        self.user_unit_should_reopen_ports = False
+        self.user_unit_read_buttons: list[ttk.Button] = []
+        self.user_unit_details_buttons: list[ttk.Button] = []
+        self.user_unit_send_buttons: list[ttk.Button] = []
+        self.user_unit_send_all_buttons: list[ttk.Button] = []
+        self.user_unit_context_menu: tk.Menu | None = None
+        self.user_unit_last_active_tree: ttk.Treeview | None = None
+        self.user_unit_selection_syncing = False
+        self.user_unit_write_transport: LogueCliTransport | None = None
+        self.user_unit_write_thread: threading.Thread | None = None
+        self.user_unit_write_in_progress = False
         self.startup_port_detection_running = False
         self.startup_port_detection_completed = False
         self.xd_detected_last_scan = False
@@ -521,8 +553,8 @@ class MainWindow:
         self._build_banks_tab()
         self._build_midi_tab()
         self._build_midi_monitor_tab()
-        self._build_user_unit_placeholder_tab(self.user_osc_tab, "User OSC")
-        self._build_user_unit_placeholder_tab(self.user_fx_tab, "User FX")
+        self._build_user_unit_tab(self.user_osc_tab, "User OSC")
+        self._build_user_unit_tab(self.user_fx_tab, "User FX")
         self._build_settings_tab()
         ttk.Label(
             self.root,
@@ -905,32 +937,32 @@ class MainWindow:
         self.bank_tree.bind("<Control-A>", self.select_all_bank_slots)
         self.bank_context_menu = self._build_bank_context_menu()
 
-    def _build_user_unit_placeholder_tab(self, parent: ttk.Frame, label: str) -> None:
+    def _build_user_unit_tab(self, parent: ttk.Frame, label: str) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
 
         controls = ttk.Frame(parent)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        hardware_note = (
-            "Read/write for User OSC/FX is pending logue SDK/logue-cli protocol verification. "
-            "These slots are local assignments only; hardware status is unknown."
-        )
+        hardware_note = "Send to XD uses the official logue-cli load/clear path and changes hardware state immediately."
+        send_all_command = self.send_all_user_osc_to_xd if label == "User OSC" else self.send_all_user_fx_to_xd
         button_specs = [
-            ("Read from XD", self.user_unit_send_not_implemented, tk.DISABLED),
-            ("Load Unit", self.import_user_units, tk.NORMAL),
-            ("View Details", self.view_selected_user_unit_manifest, tk.NORMAL),
-            ("Rename", self.rename_selected_user_unit_assignment, tk.NORMAL),
-            ("Move To", self.move_selected_user_unit_assignment, tk.NORMAL),
-            ("Delete / Clear", self.remove_selected_user_units, tk.NORMAL),
-            ("Save Assignments", self.save_user_unit_assignments_as, tk.NORMAL),
-            ("Load Assignments", self.load_user_unit_assignments_from_file, tk.NORMAL),
-            ("Send to XD", self.user_unit_send_not_implemented, tk.DISABLED),
-            ("Refresh", self.refresh_user_units_trees, tk.NORMAL),
+            ("Read from XD", self.read_user_unit_inventory_from_xd, tk.NORMAL),
+            ("Details", self.view_selected_user_unit_details, tk.NORMAL),
+            ("Send to XD", self.user_unit_send_not_implemented, tk.NORMAL),
+            ("Send ALL", send_all_command, tk.NORMAL),
         ]
         for index, (text, command, state) in enumerate(button_specs):
             button = ttk.Button(controls, text=text, command=command, state=state)
             button.grid(row=0, column=index, padx=(0, 6), pady=(0, 2))
-            if state == tk.DISABLED:
+            if text == "Read from XD":
+                self.user_unit_read_buttons.append(button)
+            if text == "Details":
+                self.user_unit_details_buttons.append(button)
+            if text == "Send to XD":
+                self.user_unit_send_buttons.append(button)
+            if text == "Send ALL":
+                self.user_unit_send_all_buttons.append(button)
+            if text in {"Send to XD", "Send ALL"}:
                 ToolTip(button, hardware_note)
         status_var = self.user_osc_status_var if label == "User OSC" else self.user_fx_status_var
         ttk.Label(
@@ -938,29 +970,26 @@ class MainWindow:
             textvariable=status_var,
             foreground="#5f6368",
             wraplength=1100,
-        ).grid(row=1, column=0, columnspan=10, sticky="w", pady=(6, 0))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         if label == "User OSC":
             tree = ttk.Treeview(
                 parent,
-                columns=("slot", "name", "type", "compatibility", "status", "source", "notes"),
+                columns=("slot", "name", "version"),
                 show="headings",
-                selectmode="extended",
+                selectmode="browse",
             )
             self._setup_tree(
                 tree,
                 [
                     ("slot", "Slot", 90),
-                    ("name", "Name", 170),
-                    ("type", "Type", 110),
-                    ("compatibility", "Compatibility", 170),
-                    ("status", "Status", 190),
-                    ("source", "Source", 220),
-                    ("notes", "Notes", 260),
+                    ("name", "Name", 220),
+                    ("version", "Version", 150),
                 ],
             )
             tree.grid(row=1, column=0, sticky="nsew")
             self.user_osc_tree = tree
+            self.configure_user_unit_tree(tree)
         else:
             fx_frame = ttk.Frame(parent)
             fx_frame.grid(row=1, column=0, sticky="nsew")
@@ -969,7 +998,7 @@ class MainWindow:
             fx_frame.rowconfigure(0, weight=1)
             self.user_fx_trees: dict[str, ttk.Treeview] = {}
             for column, (key, title) in enumerate(
-                (("modfx", "MOD FX"), ("delfx", "DELAY FX"), ("revfx", "REVERB FX"))
+                (("modfx", "MOD"), ("delfx", "DELAY"), ("revfx", "REVERB"))
             ):
                 group = ttk.LabelFrame(fx_frame, text=title)
                 group.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
@@ -977,24 +1006,25 @@ class MainWindow:
                 group.rowconfigure(0, weight=1)
                 tree = ttk.Treeview(
                     group,
-                    columns=("slot", "name", "type", "compatibility", "status"),
+                    columns=("slot", "name", "version"),
                     show="headings",
-                    selectmode="extended",
+                    selectmode="browse",
                 )
                 self._setup_tree(
                     tree,
                     [
                         ("slot", "Slot", 86),
-                        ("name", "Name", 150),
-                        ("type", "Type", 80),
-                        ("compatibility", "Compatibility", 130),
-                        ("status", "Status", 180),
+                        ("name", "Name", 170),
+                        ("version", "Version", 120),
                     ],
                 )
                 tree.grid(row=0, column=0, sticky="nsew")
                 ttk.Scrollbar(group, orient=tk.VERTICAL, command=tree.yview).grid(row=0, column=1, sticky="ns")
                 tree.configure(yscrollcommand=group.grid_slaves(row=0, column=1)[0].set)
                 self.user_fx_trees[key] = tree
+                self.configure_user_unit_tree(tree)
+        if self.user_unit_context_menu is None:
+            self.user_unit_context_menu = self._build_user_unit_context_menu()
 
     def _build_settings_tab(self) -> None:
         self.settings_tab.columnconfigure(0, weight=1)
@@ -1129,6 +1159,91 @@ class MainWindow:
             text="Batch cancel enabled. First-send warning is always shown before raw SysEx transfer.",
             foreground="#5f6368",
         ).grid(row=len(path_rows), column=0, columnspan=2, sticky="w", padx=8, pady=(8, 6))
+
+    def configure_user_unit_tree(self, tree: ttk.Treeview) -> None:
+        tree.bind("<Double-1>", self.on_user_unit_tree_double_click)
+        tree.bind("<Return>", self.on_user_unit_tree_return)
+        tree.bind("<Delete>", self.on_user_unit_tree_delete)
+        tree.bind("<Button-3>", self.show_user_unit_context_menu)
+        tree.bind("<<TreeviewSelect>>", self.on_user_unit_tree_select)
+        tree.bind("<FocusIn>", self.on_user_unit_tree_focus)
+
+    def _build_user_unit_context_menu(self) -> tk.Menu:
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Load Unit...", command=self.load_replace_selected_user_unit_slot)
+        menu.add_command(label="Replace Unit...", command=self.load_replace_selected_user_unit_slot)
+        menu.add_command(label="Clear Pending Assignment", command=self.clear_selected_user_unit_pending)
+        menu.add_command(label="Mark Slot for Clear", command=self.mark_selected_user_unit_slot_for_clear)
+        menu.add_separator()
+        menu.add_command(label="Details", command=self.view_selected_user_unit_details)
+        menu.add_command(label="Open Source Folder", command=self.open_selected_user_unit_source_folder)
+        return menu
+
+    def show_user_unit_context_menu(self, event: tk.Event) -> None:
+        tree = event.widget
+        item = tree.identify_row(event.y)
+        if item in USER_UNIT_SLOTS_BY_KEY:
+            tree.selection_set([item])
+            tree.focus(item)
+        self.update_user_unit_context_menu()
+        assert self.user_unit_context_menu is not None
+        self.user_unit_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def update_user_unit_context_menu(self) -> None:
+        if self.user_unit_context_menu is None:
+            return
+        slot_key = self.selected_user_unit_slot_key()
+        has_slot = slot_key is not None
+        has_pending = bool(has_slot and self.user_unit_workspace.slot_state(slot_key).pending_assignment is not None)
+        has_clear_pending = bool(has_slot and self.user_unit_workspace.slot_state(slot_key).pending_clear)
+        has_source = bool(self.selected_user_unit_pending_path())
+        entries = {
+            "Load Unit...": has_slot,
+            "Replace Unit...": has_slot,
+            "Clear Pending Assignment": has_slot and (has_pending or has_clear_pending),
+            "Mark Slot for Clear": has_slot,
+            "Details": has_slot,
+            "Open Source Folder": has_source,
+        }
+        for label, enabled in entries.items():
+            self.user_unit_context_menu.entryconfig(label, state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def on_user_unit_tree_double_click(self, event: tk.Event) -> str:
+        tree = event.widget
+        item = tree.identify_row(event.y)
+        if item in USER_UNIT_SLOTS_BY_KEY:
+            tree.selection_set([item])
+            tree.focus(item)
+            self.user_unit_last_active_tree = tree
+            self.load_replace_selected_user_unit_slot()
+        return "break"
+
+    def on_user_unit_tree_return(self, _event: tk.Event | None = None) -> str:
+        self.load_replace_selected_user_unit_slot()
+        return "break"
+
+    def on_user_unit_tree_delete(self, _event: tk.Event | None = None) -> str:
+        self.clear_selected_user_unit_pending()
+        return "break"
+
+    def on_user_unit_tree_select(self, event: tk.Event) -> None:
+        tree = event.widget
+        self.user_unit_last_active_tree = tree
+        if self.user_unit_selection_syncing:
+            return
+        self.user_unit_selection_syncing = True
+        try:
+            for other in self.iter_user_unit_trees():
+                if other is tree:
+                    continue
+                selection = other.selection()
+                if selection:
+                    other.selection_remove(selection)
+        finally:
+            self.user_unit_selection_syncing = False
+
+    def on_user_unit_tree_focus(self, event: tk.Event) -> None:
+        self.user_unit_last_active_tree = event.widget
 
     @staticmethod
     def _setup_tree(tree: ttk.Treeview, columns: list[tuple[str, str, int]]) -> None:
@@ -2531,6 +2646,26 @@ class MainWindow:
         programs = list(analysis["bank_programs"])
         if programs:
             self.load_captured_programs_into_edit_view(programs, merge=True)
+            decoded_programs = self.bank.export_programs()
+            me_report = analyze_multiengine_refs(decoded_programs)
+            try:
+                report_path = dumps_dir() / f"multiengine_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+                report_path.write_text(
+                    multiengine_report_text(
+                        me_report,
+                        inventory_snapshot=self.user_unit_inventory_snapshot,
+                        source_label=self.loaded_source_path or "",
+                    ),
+                    encoding="utf-8",
+                )
+                self.append_log(
+                    log_line(
+                        f"Multiengine analysis: {me_report.multiengine_count} programs use User OSC; "
+                        f"report saved: {report_path.name}"
+                    )
+                )
+            except OSError as exc:
+                self.append_log(log_line(f"WARNING Multiengine report could not be saved: {exc}"))
             total_filled = sum(1 for slot in self.bank.slots if slot.raw or slot.prog_bin)
             self.append_log(
                 log_line(
@@ -3891,181 +4026,141 @@ class MainWindow:
         self.append_log(log_line(f"Created backup bundle: {zip_path}"))
 
     def refresh_user_units_trees(self) -> None:
-        units = scan_user_units(user_units_dir())
-        units_by_filename = {unit.path.name: unit for unit in units}
-        assigned_filenames = {
-            assignment.filename
-            for assignment in self.user_unit_assignments.values()
-            if assignment.filename
-        }
-        unassigned_units = [
-            unit for unit in units if unit.path.name not in assigned_filenames
-        ]
         if hasattr(self, "user_osc_tree"):
             self.user_osc_tree.delete(*self.user_osc_tree.get_children())
             for slot in USER_OSC_SLOTS:
-                self.insert_user_unit_row(self.user_osc_tree, slot, units_by_filename, include_source=True)
+                self.insert_user_unit_row(self.user_osc_tree, slot)
         for prefix, tree in getattr(self, "user_fx_trees", {}).items():
             tree.delete(*tree.get_children())
             for slot in (slot for slot in USER_FX_SLOTS if slot.key.startswith(prefix)):
-                self.insert_user_unit_row(tree, slot, units_by_filename, include_source=False)
-        for unit in unassigned_units:
-            self.insert_unassigned_user_unit_row(unit)
-        osc_unassigned = sum(1 for unit in unassigned_units if unit.module == "osc")
-        fx_unassigned = sum(1 for unit in unassigned_units if unit.module in {"modfx", "delfx", "revfx"})
-        other_unassigned = len(unassigned_units) - osc_unassigned - fx_unassigned
-        self.user_osc_status_var.set(
-            "User OSC local slots 1-16. "
-            f"Unassigned OSC files: {osc_unassigned}. "
-            + (
-                f"Other unsupported local files: {other_unassigned}. "
-                if other_unassigned
-                else ""
+                self.insert_user_unit_row(tree, slot)
+        if not self.user_osc_status_var.get():
+            self.user_osc_status_var.set(
+                "Select a slot, then double-click or press Enter to load a pending User OSC assignment."
             )
-            + "Read from XD is not implemented because User Units "
-            "do not use the normal Program Dump workflow."
-        )
-        self.user_fx_status_var.set(
-            "User FX local slots: Mod FX 1-16, Delay FX 1-8, Reverb FX 1-8. "
-            f"Unassigned FX files: {fx_unassigned}. "
-            "Send/read hardware actions stay disabled until the logue transfer protocol is verified."
-        )
-
-    def insert_user_unit_row(self, tree: ttk.Treeview, slot, units_by_filename: dict[str, object], *, include_source: bool) -> None:
-        assignment = self.user_unit_assignments.get(slot.key)
-        unit = units_by_filename.get(assignment.filename) if assignment else None
-        if assignment and unit is None:
-            values = (
-                slot.label,
-                assignment.display_name or assignment.filename,
-                "",
-                "unknown compatibility",
-                "local assignment missing file",
-                assignment.filename,
-                "File is not in the local user-unit library folder.",
+        if not self.user_fx_status_var.get():
+            self.user_fx_status_var.set(
+                "Select a slot, then double-click or press Enter to load a pending User FX assignment."
             )
-        elif unit is None:
-            values = (slot.label, "Empty", "", "", "empty", "", "")
-        else:
-            display_name = assignment.display_name if assignment and assignment.display_name else unit.name
-            values = (
-                slot.label,
-                display_name,
-                unit.module,
-                unit.compatibility,
-                "local assignment; hardware status unknown",
-                unit.path.name,
-                unit.notes or f"{unit.size} bytes | {unit.short_hash}",
-            )
-        tree.insert("", tk.END, iid=slot.key, values=values if include_source else values[:5])
 
-    def insert_unassigned_user_unit_row(self, unit: UserUnitFile) -> None:
-        tree, include_source = self.user_unit_tree_for(unit)
-        values = (
-            "Local file",
-            unit.name,
-            unit.module,
-            unit.compatibility,
-            "unassigned local file",
-            unit.path.name,
-            unit.notes or f"{unit.size} bytes | {unit.short_hash}",
-        )
-        tree.insert(
-            "",
-            tk.END,
-            iid=f"file:{unit.path.name}",
-            values=values if include_source else values[:5],
-        )
+    def insert_user_unit_row(self, tree: ttk.Treeview, slot) -> None:
+        state = self.user_unit_workspace.slot_state(slot.key)
+        name, version = self.user_unit_row_display(state)
+        values = (slot.label, name, version)
+        tree.insert("", tk.END, iid=slot.key, values=values)
 
-    def user_unit_tree_for(self, unit: UserUnitFile) -> tuple[ttk.Treeview, bool]:
-        fx_tree = getattr(self, "user_fx_trees", {}).get(unit.module)
-        if fx_tree is not None:
-            return fx_tree, False
-        return self.user_osc_tree, True
+    def user_unit_row_display(self, state) -> tuple[str, str]:
+        hardware = state.installed_on_xd
+        pending = state.pending_assignment
+        if hardware is not None:
+            if hardware.occupied:
+                return hardware.display_name or "Installed", self.user_unit_version_display(state)
+            if hardware.occupied is False:
+                return "Empty", self.user_unit_version_display(state)
+            return hardware.display_name or "Unknown", self.user_unit_version_display(state)
+        if state.pending_clear:
+            return "Pending clear (Local)", self.user_unit_version_display(state)
+        if pending is not None:
+            return f"{pending.display_name} (Local)", self.user_unit_version_display(state)
+        return "Empty", ""
+
+    @staticmethod
+    def user_unit_version_display(state) -> str:
+        hardware = state.installed_on_xd
+        pending = state.pending_assignment
+        hardware_version = (hardware.unit_version or "").strip() if hardware is not None and hardware.occupied else ""
+        pending_version = str(pending.unit_version).strip() if pending is not None else ""
+        if hardware_version and pending_version and hardware_version != pending_version:
+            return f"XD {hardware_version} / Local {pending_version}"
+        if pending_version:
+            return pending_version
+        if hardware_version:
+            return hardware_version
+        return ""
 
     def import_user_units(self) -> None:
-        paths = filedialog.askopenfilenames(
-            title="Import User OSC / User FX files",
-            filetypes=[("User unit files", "*.mnlgxdunit *.logueunit *.prlgunit *.zip *.bin *.wav"), ("All files", "*.*")],
-        )
-        warnings = []
-        for path in paths:
-            try:
-                unit = import_user_unit(Path(path), user_units_dir())
-                slot_key = first_available_slot_key(unit, self.user_unit_assignments)
-                slot_note = "not assigned"
-                if slot_key:
-                    self.user_unit_assignments[slot_key] = UserUnitAssignment(filename=unit.path.name)
-                    save_user_unit_assignments(self.user_unit_assignment_path, self.user_unit_assignments)
-                    slot_note = USER_UNIT_SLOTS_BY_KEY[slot_key].label
-                elif unit.module not in {"osc", "modfx", "delfx", "revfx"}:
-                    warnings.append(f"{unit.path.name}: unsupported or unknown unit type")
-                else:
-                    warnings.append(f"{unit.path.name}: no compatible empty local slot")
-                self.append_log(
-                    log_line(
-                        f"Imported user unit: {unit.path.name} | {unit.kind} | "
-                        f"{unit.compatibility} | {unit.status} | {slot_note}"
-                    )
-                )
-                if unit.status in {"invalid container/header", "parser error"}:
-                    warnings.append(f"{unit.path.name}: {unit.status} - {unit.notes}")
-            except Exception as exc:
-                self.append_log(log_line(f"Could not import user unit {path}: {exc}"))
-                warnings.append(f"{Path(path).name}: {exc}")
-        self.refresh_user_units_trees()
-        if warnings:
-            messagebox.showwarning("User unit import", "\n".join(warnings))
+        self.load_replace_selected_user_unit_slot()
 
-    def remove_selected_user_units(self) -> None:
-        selected = self.selected_user_unit_slot_keys()
-        selected_files = self.selected_user_unit_file_names()
-        if not selected and not selected_files:
+    def load_replace_selected_user_unit_slot(self) -> None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            messagebox.showinfo("No slot selected", "Please select a User OSC or User FX slot first.")
             return
-        assigned = [key for key in selected if key in self.user_unit_assignments]
-        if selected_files:
-            if not messagebox.askyesno(
-                "Remove local files",
-                "Remove selected unassigned user-unit file(s) from the local library folder? "
-                "This does not touch the synth.",
-            ):
-                return
-            for filename in selected_files:
-                path = user_units_dir() / filename
-                try:
-                    if path.is_file():
-                        path.unlink()
-                        self.append_log(log_line(f"Removed local user-unit file: {filename}"))
-                except OSError as exc:
-                    self.append_log(log_line(f"Could not remove {filename}: {exc}"))
-            self.refresh_user_units_trees()
+        slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+        module = UnitModule(slot.accepts_modules[0])
+        slot_index = int(slot_key.split("-", 1)[1]) - 1
+        self.activate_unit_slot(module=module, slot_index=slot_index)
+
+    def activate_unit_slot(self, module: UnitModule, slot_index: int) -> None:
+        title = f"Load {module.display_name} for slot {slot_index + 1:02d}"
+        path = filedialog.askopenfilename(
+            title=title,
+            filetypes=[("minilogue xd Unit", "*.mnlgxdunit"), ("All files", "*.*")],
+        )
+        if not path:
             return
-        if not messagebox.askyesno(
-            "Clear local assignment",
-            "Clear selected local user-unit slot assignment(s)? This does not touch the synth or delete files.",
-        ):
+        installed_firmware = self.user_unit_inventory_snapshot.system_version if self.user_unit_inventory_snapshot else None
+        result = self.user_unit_validator.validate_for_destination(
+            path=Path(path),
+            destination_module=module,
+            destination_slot=slot_index,
+            installed_firmware=installed_firmware,
+        )
+        if not result.ok or result.unit is None:
+            messagebox.showerror("Incompatible User Unit", result.user_message)
+            self.append_log(log_line(f"Rejected pending User Unit assignment: {Path(path).name} -> {module.value}-{slot_index + 1:02d}"))
             return
-        for key in assigned:
-            assignment = self.user_unit_assignments.pop(key)
-            self.append_log(log_line(f"Cleared local user-unit slot {key}: {assignment.filename}"))
-        save_user_unit_assignments(self.user_unit_assignment_path, self.user_unit_assignments)
+        staged = self.user_unit_workspace.assign_pending(
+            module=module,
+            slot_index=slot_index,
+            unit=result.unit,
+        )
         self.refresh_user_units_trees()
+        slot_key = slot_key_for(module, slot_index)
+        tree = self.user_unit_tree_for_slot_key(slot_key)
+        tree.selection_set([slot_key])
+        tree.focus(slot_key)
+        self.mark_dirty(f"Pending User Unit assignment set for {USER_UNIT_SLOTS_BY_KEY[slot_key].label}: {staged.display_name}")
+        self.append_log(log_line(f"Pending User Unit assignment: {USER_UNIT_SLOTS_BY_KEY[slot_key].label} <- {staged.source_path.name}"))
+        if result.warnings:
+            messagebox.showwarning("Assigned with warnings", "\n".join(result.warnings))
+        self.user_osc_status_var.set("Pending User Unit assignment updated locally. No data was sent to the XD.")
+        self.user_fx_status_var.set("Pending User Unit assignment updated locally. No data was sent to the XD.")
+
+    def clear_selected_user_unit_pending(self) -> None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            return
+        state = self.user_unit_workspace.slot_state(slot_key)
+        if state.pending_assignment is None and not state.pending_clear:
+            return
+        self.user_unit_workspace.clear_pending_assignment(module=state.module, slot_index=state.slot_index)
+        self.refresh_user_units_trees()
+        self.mark_dirty(f"Cleared pending User Unit change for {USER_UNIT_SLOTS_BY_KEY[slot_key].label}")
+        self.append_log(log_line(f"Cleared pending User Unit change: {USER_UNIT_SLOTS_BY_KEY[slot_key].label}"))
+
+    def mark_selected_user_unit_slot_for_clear(self) -> None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            return
+        state = self.user_unit_workspace.slot_state(slot_key)
+        self.user_unit_workspace.mark_slot_for_clear(module=state.module, slot_index=state.slot_index)
+        self.refresh_user_units_trees()
+        self.mark_dirty(f"Marked {USER_UNIT_SLOTS_BY_KEY[slot_key].label} for clear on next future transfer plan")
+        self.append_log(log_line(f"Marked slot for clear: {USER_UNIT_SLOTS_BY_KEY[slot_key].label}"))
 
     def selected_user_unit_slot_keys(self) -> list[str]:
-        selected = []
-        for tree in self.iter_user_unit_trees():
+        for tree in self.preferred_user_unit_trees():
+            selected = []
             for item in tree.selection():
                 if item in USER_UNIT_SLOTS_BY_KEY:
                     selected.append(item)
-        return selected
+            if selected:
+                return selected
+        return []
 
     def selected_user_unit_file_names(self) -> list[str]:
-        selected = []
-        for tree in self.iter_user_unit_trees():
-            for item in tree.selection():
-                if item.startswith("file:"):
-                    selected.append(item.removeprefix("file:"))
-        return selected
+        return []
 
     def iter_user_unit_trees(self):
         if hasattr(self, "user_osc_tree"):
@@ -4073,107 +4168,584 @@ class MainWindow:
         for tree in getattr(self, "user_fx_trees", {}).values():
             yield tree
 
+    def preferred_user_unit_trees(self):
+        preferred: list[ttk.Treeview] = []
+        current_tab = self.current_notebook_tab_widget()
+        if current_tab is self.user_osc_tab and hasattr(self, "user_osc_tree"):
+            preferred.append(self.user_osc_tree)
+        elif current_tab is self.user_fx_tab:
+            preferred.extend(getattr(self, "user_fx_trees", {}).values())
+        if (
+            self.user_unit_last_active_tree is not None
+            and self.user_unit_last_active_tree not in preferred
+        ):
+            preferred.insert(0, self.user_unit_last_active_tree)
+        for tree in self.iter_user_unit_trees():
+            if tree not in preferred:
+                preferred.append(tree)
+        return preferred
+
+    def current_notebook_tab_widget(self):
+        try:
+            selected = self.tabs.select()
+            return self.root.nametowidget(selected) if selected else None
+        except tk.TclError:
+            return None
+
     def selected_user_unit_path(self) -> Path | None:
-        selected_files = self.selected_user_unit_file_names()
-        if selected_files:
-            path = user_units_dir() / selected_files[0]
-            if path.is_file():
-                return path
-        for key in self.selected_user_unit_slot_keys():
-            assignment = self.user_unit_assignments.get(key)
-            if assignment:
-                path = user_units_dir() / assignment.filename
-                if path.is_file():
-                    return path
-        return None
+        return self.selected_user_unit_pending_path()
+
+    def selected_user_unit_pending_path(self) -> Path | None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            return None
+        pending = self.user_unit_workspace.slot_state(slot_key).pending_assignment
+        if pending is None:
+            return None
+        return pending.source_path if pending.source_path.is_file() else None
+
+    def selected_user_unit_slot_key(self) -> str | None:
+        selected = self.selected_user_unit_slot_keys()
+        return selected[0] if selected else None
+
+    def user_unit_slots_for_key(self, slot_key: str) -> tuple:
+        if slot_key.startswith("osc-"):
+            return USER_OSC_SLOTS
+        if slot_key.startswith("modfx-"):
+            return tuple(slot for slot in USER_FX_SLOTS if slot.key.startswith("modfx-"))
+        if slot_key.startswith("delfx-"):
+            return tuple(slot for slot in USER_FX_SLOTS if slot.key.startswith("delfx-"))
+        if slot_key.startswith("revfx-"):
+            return tuple(slot for slot in USER_FX_SLOTS if slot.key.startswith("revfx-"))
+        return ()
+
+    def user_unit_tree_for_slot_key(self, slot_key: str) -> ttk.Treeview:
+        if slot_key.startswith("osc-"):
+            return self.user_osc_tree
+        prefix = slot_key.split("-", 1)[0]
+        return self.user_fx_trees[prefix]
+
+    @staticmethod
+    def user_unit_status_text(hardware: UserUnitSlotInfo) -> str:
+        return {
+            "Installed": "Installed on XD",
+            "Empty": "Empty on XD",
+            "Unknown": "Unknown",
+            "Read error": "Read error",
+        }.get(hardware.status, hardware.status)
+
+    def read_user_unit_inventory_from_xd(self) -> None:
+        if self.user_unit_inventory_reading:
+            self.cancel_user_unit_inventory_read()
+            return
+        if self.user_unit_write_in_progress:
+            messagebox.showwarning("Busy", "A User Unit write operation is already in progress.")
+            return
+        if self.current_sender is not None:
+            messagebox.showwarning("Busy", "A send operation is already in progress.")
+            return
+        if self.native_capture_worker is not None and self.native_capture_worker.is_running:
+            messagebox.showwarning("Busy", "A dump capture is already running.")
+            return
+        input_name = self.selected_input_port()
+        output_name = self.selected_output_port()
+        if not input_name or not output_name:
+            messagebox.showwarning("Read from XD", "Select MIDI IN and MIDI OUT ports first.")
+            return
+
+        self.user_unit_inventory_reading = True
+        self.user_unit_should_reopen_ports = self.receiver.is_open
+        self.user_unit_inventory_reader = UserUnitInventoryReader(
+            input_name,
+            output_name,
+            progress_callback=lambda message: self.gui_callback_queue.put(
+                lambda message=message: self.update_user_unit_inventory_status(message)
+            ),
+        )
+        self.set_user_unit_transfer_controls(reading=True, writing=False)
+        self.update_user_unit_inventory_status("Connecting to minilogue xd...")
+        self.append_log(log_line("User Unit inventory read started."))
+        self.append_log(log_line(f"Selected MIDI IN: {input_name}"))
+        self.append_log(log_line(f"Selected MIDI OUT: {output_name}"))
+        if self.user_unit_should_reopen_ports:
+            self.close_ports()
+            self.append_log(log_line("Closed mido MIDI ports before running official logue-cli probe."))
+
+        def worker() -> None:
+            try:
+                snapshot = self.user_unit_inventory_reader.read_inventory()
+            except InventoryCancelledError:
+                self.gui_callback_queue.put(self.finish_user_unit_inventory_cancelled)
+            except (
+                InventoryTimeoutError,
+                LogueCliCommandError,
+                LogueCliNotFoundError,
+                PortResolutionError,
+                RuntimeError,
+            ) as exc:
+                self.gui_callback_queue.put(
+                    lambda exc=exc: self.finish_user_unit_inventory_failed(exc)
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.gui_callback_queue.put(
+                    lambda exc=exc: self.finish_user_unit_inventory_failed(exc)
+                )
+            else:
+                self.gui_callback_queue.put(
+                    lambda snapshot=snapshot: self.finish_user_unit_inventory_success(snapshot)
+                )
+
+        self.user_unit_read_thread = threading.Thread(
+            target=worker,
+            name="user-unit-inventory-reader",
+            daemon=True,
+        )
+        self.user_unit_read_thread.start()
+
+    def cancel_user_unit_inventory_read(self) -> None:
+        if self.user_unit_inventory_reader is None:
+            return
+        self.update_user_unit_inventory_status("Cancelling User Unit inventory read...")
+        self.user_unit_inventory_reader.cancel()
+
+    def update_user_unit_inventory_status(self, message: str) -> None:
+        self.user_osc_status_var.set(message)
+        self.user_fx_status_var.set(message)
+        self.listen_status_var.set(message)
+        self.append_log(log_line(message))
+
+    def finish_user_unit_inventory_success(self, snapshot: UserUnitInventorySnapshot) -> None:
+        self.user_unit_inventory_snapshot = snapshot
+        self.user_unit_slot_inventory = dict(snapshot.slots)
+        self.user_unit_workspace.set_hardware_inventory(self.user_unit_slot_inventory)
+        pending_reconciled = self.user_unit_workspace.reconcile_pending_with_hardware()
+        self.refresh_user_units_trees()
+        for slot_info in sorted(snapshot.slots.values(), key=lambda item: item.slot_key):
+            name = slot_info.display_name or "Empty"
+            self.append_log(
+                log_line(
+                    f"Parsed slot {slot_info.slot_key}: {slot_info.status} | {name}"
+                )
+            )
+        summary = (
+            f"Inventory read complete. Device: {snapshot.device_name} | "
+            f"System: {snapshot.system_version or 'unknown'} | "
+            f"Logue API: {snapshot.logue_api_version or 'unknown'}"
+        )
+        self.user_osc_status_var.set(summary)
+        self.user_fx_status_var.set(summary)
+        self.listen_status_var.set("Inventory read complete.")
+        self.append_log(log_line(summary))
+        if pending_reconciled:
+            self.append_log(log_line("Reconciled pending local User Unit state against current XD inventory."))
+        if snapshot.warnings:
+            self.append_log(log_line("Inventory warnings: " + "; ".join(snapshot.warnings)))
+        self.complete_user_unit_inventory_read()
+
+    def finish_user_unit_inventory_failed(self, exc: Exception) -> None:
+        message = self.friendly_user_unit_inventory_error(exc)
+        self.last_error = message
+        self.user_osc_status_var.set(message)
+        self.user_fx_status_var.set(message)
+        self.listen_status_var.set("Inventory read failed.")
+        self.append_log(log_line(f"Inventory read failed: {message}"))
+        messagebox.showwarning("Read from XD", message)
+        self.complete_user_unit_inventory_read()
+
+    def finish_user_unit_inventory_cancelled(self) -> None:
+        self.user_osc_status_var.set("Inventory read cancelled.")
+        self.user_fx_status_var.set("Inventory read cancelled.")
+        self.listen_status_var.set("Inventory read cancelled.")
+        self.append_log(log_line("Inventory read cancelled."))
+        self.complete_user_unit_inventory_read()
+
+    def complete_user_unit_inventory_read(self) -> None:
+        self.user_unit_inventory_reading = False
+        self.user_unit_inventory_reader = None
+        self.user_unit_read_thread = None
+        self.restore_user_unit_ports_if_needed()
+        self.set_user_unit_transfer_controls(reading=False, writing=self.user_unit_write_in_progress)
+
+    def restore_user_unit_ports_if_needed(self) -> None:
+        if not self.user_unit_should_reopen_ports:
+            return
+        self.user_unit_should_reopen_ports = False
+        self.open_ports()
+        if self.receiver.is_open:
+            self.append_log(log_line("Reopened mido MIDI ports after User Unit logue-cli operation."))
+
+    def set_user_unit_transfer_controls(self, *, reading: bool, writing: bool) -> None:
+        for button in self.user_unit_read_buttons:
+            button.configure(
+                text="Cancel Read" if reading else "Read from XD",
+                command=self.cancel_user_unit_inventory_read if reading else self.read_user_unit_inventory_from_xd,
+                state=tk.DISABLED if writing else tk.NORMAL,
+            )
+        for button in self.user_unit_details_buttons:
+            button.configure(state=tk.DISABLED if reading or writing else tk.NORMAL)
+        for button in self.user_unit_send_buttons:
+            button.configure(state=tk.DISABLED if reading or writing else tk.NORMAL)
+        for button in self.user_unit_send_all_buttons:
+            button.configure(state=tk.DISABLED if reading or writing else tk.NORMAL)
+
+    @staticmethod
+    def friendly_user_unit_inventory_error(exc: Exception) -> str:
+        message = str(exc).strip() or exc.__class__.__name__
+        lowered = message.casefold()
+        if "search device request timed out" in lowered or "logue handshake failed" in lowered:
+            return "No compatible minilogue xd detected."
+        if "no compatible minilogue xd detected" in lowered:
+            return "No compatible minilogue xd detected."
+        return message
 
     def rename_selected_user_unit_assignment(self) -> None:
-        selected = self.selected_user_unit_slot_keys()
-        if not selected:
-            return
-        key = selected[0]
-        assignment = self.user_unit_assignments.get(key)
-        if not assignment:
-            messagebox.showinfo("No assignment", "Select an assigned local user-unit slot first.")
-            return
-        default_name = assignment.display_name or Path(assignment.filename).stem
-        name = simpledialog.askstring("Rename local display", "Display name:", initialvalue=default_name)
-        if name is None:
-            return
-        assignment.display_name = name.strip()
-        save_user_unit_assignments(self.user_unit_assignment_path, self.user_unit_assignments)
-        self.refresh_user_units_trees()
+        messagebox.showinfo(
+            "Not available",
+            "Display-name renaming is not part of the slot-based pending workflow.",
+        )
 
     def move_selected_user_unit_assignment(self) -> None:
-        selected = self.selected_user_unit_slot_keys()
-        selected_files = self.selected_user_unit_file_names()
-        if not selected and not selected_files:
-            return
-        source_key = selected[0] if selected else ""
-        assignment = (
-            self.user_unit_assignments.get(source_key)
-            if source_key
-            else UserUnitAssignment(filename=selected_files[0])
+        messagebox.showinfo(
+            "Not available",
+            "Moving pending assignments is no longer part of the slot-based workflow. "
+            "Choose the destination slot first and load the unit there.",
         )
-        if assignment is None:
-            messagebox.showinfo("No assignment", "Select an assigned local user-unit slot first.")
-            return
-        unit = next(
-            (item for item in scan_user_units(user_units_dir()) if item.path.name == assignment.filename),
-            None,
-        )
-        if unit is None:
-            messagebox.showwarning("Missing file", "The assigned user-unit file is no longer in the local library.")
-            return
-        choices = matching_slots(unit.module)
-        prompt = "Target slot key:\n\n" + "\n".join(f"{slot.key}  {slot.label}" for slot in choices)
-        target_key = simpledialog.askstring("Move local assignment", prompt, initialvalue=source_key)
-        if not target_key:
-            return
-        target_key = target_key.strip().lower()
-        valid_keys = {slot.key for slot in choices}
-        if target_key not in valid_keys:
-            messagebox.showwarning("Invalid slot", "Choose a compatible slot key from the list.")
-            return
-        self.user_unit_assignments[target_key] = assignment
-        if target_key != source_key:
-            self.user_unit_assignments.pop(source_key, None)
-        save_user_unit_assignments(self.user_unit_assignment_path, self.user_unit_assignments)
-        self.refresh_user_units_trees()
 
     def user_unit_send_not_implemented(self) -> None:
-        messagebox.showinfo(
-            "Not implemented yet",
-            "Read/write for User OSC / User FX is not implemented.\n\n"
-            "The minilogue xd does not expose User Unit slot contents through the normal Program Dump workflow. "
-            "Use local .mnlgxdunit files and local slot assignments for now.",
+        self.send_selected_user_unit_to_xd()
+
+    def send_selected_user_unit_to_xd(self) -> None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            messagebox.showinfo("No slot selected", "Please select a User OSC or User FX slot first.")
+            return
+        self.send_user_unit_slots_to_xd((slot_key,), title="Send User Unit to XD")
+
+    def send_all_user_osc_to_xd(self) -> None:
+        slot_keys = self.pending_user_unit_slot_keys_for_scope("osc")
+        if not slot_keys:
+            messagebox.showinfo("Nothing to send", "There are no pending User OSC changes to send.")
+            return
+        self.send_user_unit_slots_to_xd(slot_keys, title="Send All User OSC to XD")
+
+    def send_all_user_fx_to_xd(self) -> None:
+        slot_keys = self.pending_user_unit_slot_keys_for_scope("fx")
+        if not slot_keys:
+            messagebox.showinfo("Nothing to send", "There are no pending User FX changes to send.")
+            return
+        self.send_user_unit_slots_to_xd(slot_keys, title="Send All User FX to XD")
+
+    def pending_user_unit_slot_keys_for_scope(self, scope: str) -> tuple[str, ...]:
+        if scope == "osc":
+            slots = USER_OSC_SLOTS
+        elif scope == "fx":
+            slots = USER_FX_SLOTS
+        else:
+            slots = ()
+        return tuple(slot.key for slot in slots if self.user_unit_slot_has_pending_change(slot.key))
+
+    def user_unit_slot_has_pending_change(self, slot_key: str) -> bool:
+        state = self.user_unit_workspace.slot_state(slot_key)
+        return state.pending_assignment is not None or state.pending_clear
+
+    def send_user_unit_slots_to_xd(self, slot_keys: tuple[str, ...], *, title: str) -> None:
+        if self.user_unit_inventory_reading:
+            messagebox.showwarning("Busy", "A User Unit inventory read is already in progress.")
+            return
+        if self.user_unit_write_in_progress:
+            messagebox.showwarning("Busy", "A User Unit write operation is already in progress.")
+            return
+        if self.current_sender is not None:
+            messagebox.showwarning("Busy", "A send operation is already in progress.")
+            return
+        if self.native_capture_worker is not None and self.native_capture_worker.is_running:
+            messagebox.showwarning("Busy", "A dump capture is already running.")
+            return
+
+        normalized_slot_keys = tuple(slot_key for slot_key in slot_keys if slot_key in USER_UNIT_SLOTS_BY_KEY)
+        if not normalized_slot_keys:
+            messagebox.showinfo("Nothing to send", "There are no valid User Unit slots to send.")
+            return
+        pending_slot_keys = tuple(slot_key for slot_key in normalized_slot_keys if self.user_unit_slot_has_pending_change(slot_key))
+        if not pending_slot_keys:
+            if len(normalized_slot_keys) == 1:
+                messagebox.showinfo(
+                    "Nothing to send",
+                    "The selected slot has no pending local assignment or clear action.",
+                )
+            else:
+                messagebox.showinfo("Nothing to send", "The selected User Unit slots have no pending changes.")
+            return
+
+        input_name = self.selected_input_port()
+        output_name = self.selected_output_port()
+        if not input_name or not output_name:
+            messagebox.showwarning("Send to XD", "Select MIDI IN and MIDI OUT ports first.")
+            return
+
+        action_text = self.user_unit_write_confirmation_text(pending_slot_keys)
+        if not messagebox.askyesno(title, action_text):
+            return
+
+        self.user_unit_write_in_progress = True
+        self.user_unit_should_reopen_ports = self.receiver.is_open
+        self.user_unit_write_transport = LogueCliTransport()
+        self.set_user_unit_transfer_controls(reading=False, writing=True)
+        self.user_osc_status_var.set("Preparing User Unit write...")
+        self.user_fx_status_var.set("Preparing User Unit write...")
+        self.listen_status_var.set("Preparing User Unit write...")
+        self.append_log(log_line(f"User Unit write started for {len(pending_slot_keys)} slot(s)."))
+        self.append_log(log_line(f"Selected MIDI IN: {input_name}"))
+        self.append_log(log_line(f"Selected MIDI OUT: {output_name}"))
+        if self.user_unit_should_reopen_ports:
+            self.close_ports()
+            self.append_log(log_line("Closed mido MIDI ports before running official logue-cli write command."))
+
+        def worker() -> None:
+            assert self.user_unit_write_transport is not None
+            results: list[tuple[str, str]] = []
+            try:
+                input_index, output_index = self.user_unit_write_transport.resolve_port_indices(
+                    input_name,
+                    output_name,
+                )
+                for slot_key in pending_slot_keys:
+                    state = self.user_unit_workspace.slot_state(slot_key)
+                    if state.pending_clear:
+                        output = self.user_unit_write_transport.clear_slot(
+                            state.module.value,
+                            slot_index=state.slot_index,
+                            input_index=input_index,
+                            output_index=output_index,
+                        )
+                    else:
+                        assert state.pending_assignment is not None
+                        output = self.user_unit_write_transport.load_unit_archive(
+                            state.pending_assignment.source_path,
+                            slot_index=state.slot_index,
+                            input_index=input_index,
+                            output_index=output_index,
+                        )
+                    results.append((slot_key, output))
+            except InventoryCancelledError:
+                self.gui_callback_queue.put(self.finish_user_unit_write_cancelled)
+            except (
+                InventoryTimeoutError,
+                LogueCliCommandError,
+                LogueCliNotFoundError,
+                PortResolutionError,
+                RuntimeError,
+            ) as exc:
+                self.gui_callback_queue.put(
+                    lambda exc=exc, partial_results=tuple(results), total=len(pending_slot_keys):
+                    self.finish_user_unit_write_failed(exc, partial_results=partial_results, total=total)
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.gui_callback_queue.put(
+                    lambda exc=exc, partial_results=tuple(results), total=len(pending_slot_keys):
+                    self.finish_user_unit_write_failed(exc, partial_results=partial_results, total=total)
+                )
+            else:
+                self.gui_callback_queue.put(
+                    lambda results=tuple(results): self.finish_user_unit_write_success(results)
+                )
+
+        self.user_unit_write_thread = threading.Thread(
+            target=worker,
+            name="user-unit-writer",
+            daemon=True,
         )
+        self.user_unit_write_thread.start()
+
+    def user_unit_write_confirmation_text(self, slot_keys: tuple[str, ...]) -> str:
+        if len(slot_keys) == 1:
+            return self.single_user_unit_write_confirmation_text(slot_keys[0])
+        lines = [
+            f"This will write {len(slot_keys)} pending User Unit change(s) to the connected XD.",
+            "",
+        ]
+        for slot_key in slot_keys:
+            lines.append(self.user_unit_batch_summary_line(slot_key))
+        lines.extend(
+            [
+                "",
+                "Only slots with pending local changes will be sent.",
+                "This changes hardware state immediately. Continue?",
+            ]
+        )
+        return "\n".join(lines)
+
+    def single_user_unit_write_confirmation_text(self, slot_key: str) -> str:
+        state = self.user_unit_workspace.slot_state(slot_key)
+        slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+        if state.pending_clear:
+            return (
+                f"This will clear {slot.label} on the connected XD.\n\n"
+                "This changes hardware state immediately. Continue?"
+            )
+        assert state.pending_assignment is not None
+        lines = [
+            f"This will write a User Unit to {slot.label} on the connected XD.",
+            "",
+            f"Module: {state.module.tab_display_name}",
+            f"Unit: {state.pending_assignment.display_name}",
+            f"Version: {state.pending_assignment.unit_version}",
+        ]
+        installed = state.installed_on_xd
+        if installed is not None and installed.occupied:
+            lines.append(f"Currently on XD: {installed.display_name or 'Installed'} ({installed.unit_version or 'unknown'})")
+        else:
+            lines.append("Currently on XD: Empty or unknown")
+        lines.extend(
+            [
+                "",
+                "This changes hardware state immediately. Continue?",
+            ]
+        )
+        return "\n".join(lines)
+
+    def user_unit_batch_summary_line(self, slot_key: str) -> str:
+        state = self.user_unit_workspace.slot_state(slot_key)
+        slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+        if state.pending_clear:
+            return f"- Clear {slot.label}"
+        assert state.pending_assignment is not None
+        return f"- {slot.label}: {state.pending_assignment.display_name} ({state.pending_assignment.unit_version})"
+
+    def apply_user_unit_write_results(self, results: tuple[tuple[str, str], ...]) -> list[str]:
+        summaries: list[str] = []
+        for slot_key, _output in results:
+            state = self.user_unit_workspace.slot_state(slot_key)
+            slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+            if state.pending_clear:
+                self.user_unit_workspace.clear_pending_assignment(module=state.module, slot_index=state.slot_index)
+                self._apply_optimistic_user_unit_clear(slot_key)
+                summaries.append(f"Cleared {slot.label} on XD.")
+            else:
+                assert state.pending_assignment is not None
+                pending_assignment = state.pending_assignment
+                self.user_unit_workspace.clear_pending_assignment(module=state.module, slot_index=state.slot_index)
+                self._apply_optimistic_user_unit_install(slot_key, pending_assignment)
+                summaries.append(f"Installed {pending_assignment.display_name} to {slot.label} on XD.")
+        if results:
+            self.refresh_user_units_trees()
+        return summaries
+
+    def finish_user_unit_write_success(self, results: tuple[tuple[str, str], ...]) -> None:
+        summaries = self.apply_user_unit_write_results(results)
+        outputs = [output for _slot_key, output in results if output.strip()]
+        summary = summaries[-1] if len(summaries) == 1 else f"Sent {len(summaries)} User Unit change(s) to XD."
+        self.mark_dirty(summary)
+        self.user_osc_status_var.set(summary)
+        self.user_fx_status_var.set(summary)
+        self.listen_status_var.set("User Unit write complete.")
+        for item in summaries:
+            self.append_log(log_line(item))
+        if len(summaries) > 1:
+            self.append_log(log_line(summary))
+        for output in outputs:
+            self.append_log(log_line("logue-cli: " + " | ".join(line.strip() for line in output.splitlines() if line.strip())))
+        self.complete_user_unit_write()
+        self.trigger_user_unit_inventory_refresh_after_write()
+
+    def finish_user_unit_write_failed(
+        self,
+        exc: Exception,
+        *,
+        partial_results: tuple[tuple[str, str], ...] = (),
+        total: int = 1,
+    ) -> None:
+        summaries = self.apply_user_unit_write_results(partial_results)
+        message = self.friendly_user_unit_inventory_error(exc)
+        if total > 1:
+            message = f"{message} ({len(partial_results)}/{total} slots completed)"
+        self.last_error = message
+        self.user_osc_status_var.set(message)
+        self.user_fx_status_var.set(message)
+        self.listen_status_var.set("User Unit write failed.")
+        for item in summaries:
+            self.append_log(log_line(item))
+        self.append_log(log_line(f"User Unit write failed: {message}"))
+        self.complete_user_unit_write()
+        if partial_results:
+            self.trigger_user_unit_inventory_refresh_after_write()
+        messagebox.showwarning("Send to XD", message)
+
+    def finish_user_unit_write_cancelled(self) -> None:
+        self.user_osc_status_var.set("User Unit write cancelled.")
+        self.user_fx_status_var.set("User Unit write cancelled.")
+        self.listen_status_var.set("User Unit write cancelled.")
+        self.append_log(log_line("User Unit write cancelled."))
+        self.complete_user_unit_write()
+
+    def complete_user_unit_write(self) -> None:
+        self.user_unit_write_in_progress = False
+        self.user_unit_write_transport = None
+        self.user_unit_write_thread = None
+        self.restore_user_unit_ports_if_needed()
+        self.set_user_unit_transfer_controls(reading=self.user_unit_inventory_reading, writing=False)
+
+    def trigger_user_unit_inventory_refresh_after_write(self) -> None:
+        input_name = self.selected_input_port()
+        output_name = self.selected_output_port()
+        if not input_name or not output_name:
+            self.append_log(log_line("Skipping automatic User Unit inventory refresh: MIDI IN/OUT not selected."))
+            return
+        self.user_osc_status_var.set("Refreshing User Unit inventory from XD...")
+        self.user_fx_status_var.set("Refreshing User Unit inventory from XD...")
+        self.listen_status_var.set("Refreshing User Unit inventory from XD...")
+        self.append_log(log_line("Refreshing User Unit inventory from XD after write..."))
+        self.schedule_after(150, self.read_user_unit_inventory_from_xd)
+
+    def _apply_optimistic_user_unit_install(self, slot_key: str, pending_assignment) -> None:
+        existing = self.user_unit_slot_inventory.get(slot_key)
+        if existing is None:
+            return
+        updated = replace(
+            existing,
+            occupied=True,
+            status="Installed",
+            display_name=pending_assignment.display_name,
+            unit_name=pending_assignment.display_name,
+            unit_version=str(pending_assignment.unit_version),
+            api_version=str(pending_assignment.api_version),
+            target_platform="minilogue xd",
+            compatibility="Unknown",
+            payload_size=pending_assignment.payload_size,
+            checksum=f"0x{pending_assignment.payload_crc32:08X}",
+        )
+        self.user_unit_slot_inventory[slot_key] = updated
+        self.user_unit_workspace.set_hardware_inventory(self.user_unit_slot_inventory)
+
+    def _apply_optimistic_user_unit_clear(self, slot_key: str) -> None:
+        existing = self.user_unit_slot_inventory.get(slot_key)
+        if existing is None:
+            return
+        updated = replace(
+            existing,
+            occupied=False,
+            status="Empty",
+            display_name=None,
+            unit_name=None,
+            unit_version=None,
+            api_version=None,
+            payload_size=None,
+            checksum=None,
+        )
+        self.user_unit_slot_inventory[slot_key] = updated
+        self.user_unit_workspace.set_hardware_inventory(self.user_unit_slot_inventory)
 
     def save_user_unit_assignments_as(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Save local User Unit assignments",
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        messagebox.showinfo(
+            "Not available",
+            "Pending User Unit state is saved automatically in the workspace.",
         )
-        if not path:
-            return
-        try:
-            save_user_unit_assignments(Path(path), self.user_unit_assignments)
-            self.append_log(log_line(f"Saved local user-unit assignments: {path}"))
-        except OSError as exc:
-            messagebox.showerror("Save failed", str(exc))
 
     def load_user_unit_assignments_from_file(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Load local User Unit assignments",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        messagebox.showinfo(
+            "Not available",
+            "Pending User Unit state is loaded automatically from the workspace file.",
         )
-        if not path:
-            return
-        self.user_unit_assignments = load_user_unit_assignments(Path(path))
-        save_user_unit_assignments(self.user_unit_assignment_path, self.user_unit_assignments)
-        self.append_log(log_line(f"Loaded local user-unit assignments: {path}"))
-        self.refresh_user_units_trees()
 
     def export_user_units_manifest(self) -> None:
         messagebox.showinfo(
@@ -4182,36 +4754,166 @@ class MainWindow:
         )
 
     def view_selected_user_unit_manifest(self) -> None:
-        """Show the manifest or basic metadata for the selected user unit."""
-        path = self.selected_user_unit_path()
+        self.view_selected_user_unit_details()
+
+    def view_selected_user_unit_details(self) -> None:
+        slot_key = self.selected_user_unit_slot_key()
+        if slot_key is None:
+            messagebox.showinfo(
+                "No user unit selected",
+                "Please select a User OSC or User FX slot first.",
+            )
+            return
+        title, content = self.build_user_unit_details_dialog(slot_key)
+        self.show_text_dialog(title, content)
+
+    def build_user_unit_details_dialog(self, slot_key: str) -> tuple[str, str]:
+        slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+        slot_prefix = {
+            "osc": "User OSC",
+            "modfx": "Mod FX",
+            "delfx": "Delay FX",
+            "revfx": "Reverb FX",
+        }[slot.accepts_modules[0]]
+        title = f"{slot_prefix} Details - Slot {slot_key.split('-', 1)[1]}"
+        sections = [
+            self.build_user_unit_hardware_details(slot_key),
+            self.build_user_unit_local_details(slot_key),
+        ]
+        return title, "\n\n".join(section for section in sections if section)
+
+    def build_user_unit_hardware_details(self, slot_key: str) -> str:
+        slot = USER_UNIT_SLOTS_BY_KEY[slot_key]
+        hardware = self.user_unit_slot_inventory.get(slot_key)
+        category = {
+            "osc": "User OSC",
+            "modfx": "Mod FX",
+            "delfx": "Delay FX",
+            "revfx": "Reverb FX",
+        }[slot.accepts_modules[0]]
+        lines = ["Hardware inventory", f"Slot: {slot.label}", f"Category: {category}"]
+        if hardware is None:
+            lines.extend(
+                [
+                    "Status: Unknown",
+                    "Read Source: Not read from XD yet",
+                ]
+            )
+            return "\n".join(lines)
+        lines.extend(
+            [
+                f"Status: {self.user_unit_status_text(hardware)}",
+                f"Display Name: {self.detail_value(hardware.display_name)}",
+                f"Unit Name: {self.detail_value(hardware.unit_name)}",
+                f"Unit Version: {self.detail_value(hardware.unit_version)}",
+                f"API Version: {self.detail_value(hardware.api_version)}",
+                f"SDK Version: {self.detail_value(hardware.sdk_version)}",
+                f"Developer ID: {self.detail_value(hardware.developer_id)}",
+                f"Unit ID: {self.detail_value(hardware.unit_id)}",
+                f"Target Platform: {self.detail_value(hardware.target_platform)}",
+                f"Compatibility: {self.detail_value(hardware.compatibility)}",
+                f"Payload Size: {self.detail_value_bytes(hardware.payload_size)}",
+                f"CRC / Checksum: {self.detail_value(hardware.checksum)}",
+                f"Read Source: minilogue xd via official logue-cli probe",
+                f"Raw Protocol Command: {self.detail_value(hardware.raw_protocol_command)}",
+                f"Raw Metadata Length: {self.detail_value_int(hardware.raw_metadata_length)}",
+                f"Read Timestamp: {self.detail_value(hardware.read_timestamp)}",
+                f"Device: {self.detail_value(hardware.device_name)}",
+                f"System Version: {self.detail_value(hardware.system_version)}",
+                f"Logue API Version: {self.detail_value(hardware.logue_api_version)}",
+                "Notes / Parsing Warnings: "
+                + (
+                    "; ".join(hardware.warnings)
+                    if hardware.warnings
+                    else "None"
+                ),
+            ]
+        )
+        if hardware.raw_metadata:
+            lines.append(
+                "Raw Metadata: "
+                + hardware.raw_metadata.decode("utf-8", errors="replace")
+            )
+        return "\n".join(lines)
+
+    def build_user_unit_local_details(self, slot_key: str) -> str:
+        state = self.user_unit_workspace.slot_state(slot_key)
+        lines = ["Pending Local Assignment"]
+        if state.pending_clear:
+            lines.extend(
+                [
+                    "Status: Clear pending",
+                    "Validation Result: Pending local clear marker",
+                    "Read Source: local_assignment",
+                ]
+            )
+            return "\n".join(lines)
+        pending = state.pending_assignment
+        if pending is None:
+            lines.extend(["Status: None", "Read Source: local_assignment"])
+            return "\n".join(lines)
+
+        path = pending.source_path
+        try:
+            unit_info = inspect_user_unit(path)
+        except Exception as exc:  # noqa: BLE001
+            lines.extend(
+                [
+                    f"Source File: {path}",
+                    f"Validation Result: Missing local file ({exc})",
+                    "Read Source: local_assignment",
+                ]
+            )
+            return "\n".join(lines)
+
+        lines.extend(
+            [
+                f"Status: {'Replace pending' if state.installed_on_xd and state.installed_on_xd.occupied else 'Pending'}",
+                f"Source File: {path}",
+                f"Platform: {self.detail_value(pending.platform)}",
+                f"Module: {pending.module.tab_display_name}",
+                f"Manifest Name: {self.detail_value(pending.display_name)}",
+                f"Payload Magic: {pending.payload_magic.decode('ascii', errors='replace')}",
+                f"API Version: {pending.api_version}",
+                f"Unit Version: {pending.unit_version}",
+                f"Payload Size: {pending.payload_size} bytes",
+                f"CRC32: 0x{pending.payload_crc32:08X}",
+                "Validation Result: OK",
+                "Warnings: " + ("; ".join(pending.warnings) if pending.warnings else "None"),
+                f"Compatibility: {self.detail_value(unit_info.compatibility)}",
+                f"SHA-256: {self.detail_value(unit_info.sha256)}",
+                "Read Source: local_assignment",
+            ]
+        )
+        return "\n".join(lines)
+
+    def open_selected_user_unit_source_folder(self) -> None:
+        path = self.selected_user_unit_pending_path()
         if path is None:
-            messagebox.showinfo("No user unit selected", "Select a User OSC or User FX file first.")
+            messagebox.showinfo("No source file", "The selected slot has no pending local unit file.")
             return
         try:
-            with zipfile.ZipFile(path) as archive:
-                names = archive.namelist()
-                manifest_name = next(
-                    (name for name in names if name.endswith("manifest.json")),
-                    None,
-                )
-                if manifest_name:
-                    content = archive.read(manifest_name).decode("utf-8", errors="replace")
-                else:
-                    content = "No manifest.json found.\n\nArchive contents:\n" + "\n".join(sorted(names))
-        except zipfile.BadZipFile:
-            try:
-                content = (
-                    f"File: {path.name}\n"
-                    f"Size: {path.stat().st_size} bytes\n"
-                    "This file is not a ZIP-based .mnlgxdunit archive."
-                )
-            except OSError as exc:
-                messagebox.showerror("Manifest view failed", str(exc))
-                return
+            os.startfile(str(path.parent))
         except OSError as exc:
-            messagebox.showerror("Manifest view failed", str(exc))
-            return
-        self.show_text_dialog(f"Manifest - {path.name}", content)
+            messagebox.showerror("Open Source Folder", str(exc))
+
+    @staticmethod
+    def detail_value(value) -> str:
+        if value is None or value == "":
+            return "Unknown"
+        return str(value)
+
+    @staticmethod
+    def detail_value_int(value: int | None) -> str:
+        if value is None:
+            return "Unknown"
+        return str(value)
+
+    @staticmethod
+    def detail_value_bytes(value: int | None) -> str:
+        if value is None:
+            return "Unknown"
+        return f"{value} bytes"
 
     def show_about(self) -> None:
         messagebox.showinfo(
