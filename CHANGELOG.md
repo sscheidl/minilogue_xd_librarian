@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1-unreleased
+## 1.0.1-beta.1 – 2026-09-12
 
 - Add conservative User Unit write support through official `logue-cli load` and `clear`.
 - Add `Send to XD` and `Send ALL` workflows for pending User OSC / User FX slot changes.
