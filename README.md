@@ -2,6 +2,8 @@
 
 Windows librarian, transfer, diagnostics, and MIDI monitor tool for the Korg minilogue xd.
 
+![Preview of the minilogue xd Librarian](https://taureon-music.de/images/taureon/dev_lab/Korg_Minilogue_XD_librarian.png)
+
 Version `1.0.0` is the first consolidated release that brings the librarian workflow, the validated native SysEx receive path, and the new profile-based MIDI Monitor together in one app.
 
 ## What `v1.0.0` adds
