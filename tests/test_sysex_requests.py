@@ -11,10 +11,10 @@ from midi.sysex_requests import (
 
 class SysexRequestsTest(unittest.TestCase):
     def test_current_program_request(self):
-        self.assertEqual(request_current_program(), bytes.fromhex("F0 42 30 00 01 51 10 00 F7"))
+        self.assertEqual(request_current_program(), bytes.fromhex("F0 42 30 00 01 51 10 F7"))
         self.assertEqual(
-            request_current_program(trailing_zero=False),
-            bytes.fromhex("F0 42 30 00 01 51 10 F7"),
+            request_current_program(trailing_zero=True),
+            bytes.fromhex("F0 42 30 00 01 51 10 00 F7"),
         )
 
     def test_all_programs_request(self):
@@ -35,11 +35,11 @@ class SysexRequestsTest(unittest.TestCase):
                 self.assertEqual(slot_to_lsb_msb(slot), pair)
                 self.assertEqual(
                     request_program_slot(slot),
-                    bytes([0xF0, 0x42, 0x30, 0x00, 0x01, 0x51, 0x1C, pair[0], pair[1], 0x00, 0xF7]),
+                    bytes([0xF0, 0x42, 0x30, 0x00, 0x01, 0x51, 0x1C, pair[0], pair[1], 0xF7]),
                 )
                 self.assertEqual(
-                    request_program_slot(slot, trailing_zero=False),
-                    bytes([0xF0, 0x42, 0x30, 0x00, 0x01, 0x51, 0x1C, pair[0], pair[1], 0xF7]),
+                    request_program_slot(slot, trailing_zero=True),
+                    bytes([0xF0, 0x42, 0x30, 0x00, 0x01, 0x51, 0x1C, pair[0], pair[1], 0x00, 0xF7]),
                 )
 
     def test_program_slot_range(self):
@@ -47,6 +47,18 @@ class SysexRequestsTest(unittest.TestCase):
             with self.subTest(slot=slot):
                 with self.assertRaises(ValueError):
                     request_program_slot(slot)
+
+    def test_user_tuning_dump_classification(self):
+        scale = bytes.fromhex("F0 42 30 00 01 51 44 F7")
+        octave = bytes.fromhex("F0 42 30 00 01 51 45 F7")
+
+        scale_info = classify_xd_sysex(scale)
+        octave_info = classify_xd_sysex(octave)
+
+        self.assertEqual(scale_info.label, "user-scale-data-dump")
+        self.assertEqual(octave_info.label, "user-octave-data-dump")
+        self.assertEqual(summarize_xd_sysex_stream(scale)["0x44 user scale"], 1)
+        self.assertEqual(summarize_xd_sysex_stream(octave)["0x45 user octave"], 1)
 
     def test_write_ack_classification(self):
         raw = bytes.fromhex("F0 42 30 00 01 51 23 F7")
