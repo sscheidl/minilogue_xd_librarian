@@ -60,10 +60,13 @@ def korg_xd_header(channel: int = 0) -> list[int]:
     return [0xF0, KORG_ID, 0x30 | (channel & 0x0F), *XD_FAMILY]
 
 
-def request_current_program(channel: int = 0, trailing_zero: bool = True) -> bytes:
+def request_current_program(channel: int = 0, trailing_zero: bool = False) -> bytes:
     """Build a Current Program Dump Request (cmd 0x10).
 
     The device responds with a Current Program Dump (cmd 0x40).
+
+    The documented request is bare (no parameter byte before F7).  The
+    trailing_zero option is retained only for explicit protocol experiments.
     """
     body = [CURRENT_PROGRAM_REQUEST]
     if trailing_zero:
@@ -102,7 +105,7 @@ def slot_to_lsb_msb(slot_index: int) -> tuple[int, int]:
     return slot_index & 0x7F, (slot_index >> 7) & 0x03
 
 
-def request_program_slot(slot_index: int, channel: int = 0, trailing_zero: bool = True) -> bytes:
+def request_program_slot(slot_index: int, channel: int = 0, trailing_zero: bool = False) -> bytes:
     """Build a Program Parameter Dump Request (cmd 0x1C) for one slot.
 
     The device responds with a Program Parameter Dump (cmd 0x4C).
@@ -110,6 +113,8 @@ def request_program_slot(slot_index: int, channel: int = 0, trailing_zero: bool 
     Args:
         slot_index: 0-based slot index (0..MAX_PROGRAM_SLOT).
         channel:    MIDI channel, 0-based (0..15).
+        trailing_zero: Append a non-standard 0x00 parameter only when explicitly
+                       requested for protocol experiments. Default is False.
 
     Returns:
         SysEx bytes ready to send via MIDI OUT.
