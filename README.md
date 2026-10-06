@@ -47,8 +47,10 @@ If JSON profiles are unavailable or invalid, the app falls back safely to the bu
 - User Unit write uses the official Korg `logue-cli load` / `clear` path and then refreshes inventory from the XD.
 - The app does not send MIDI automatically on startup.
 - `0x0E` is treated as a global or diagnostic request and is expected to answer with `0x51`.
-- Full bank receive is sequential: the app sends `0x1C` slot requests and waits for `0x4C`.
-- Current and slot requests use the validated trailing-`00` request variant from the lab tools.
+- `0x44` is User Scale Data Dump and `0x45` is User Octave Data Dump; they are not bank/sequencer index blocks.
+- A manual XD `ALL DUMP` capture consists of 500 `0x4C` program dumps, 6 `0x44` user-scale dumps, 6 `0x45` user-octave dumps, and 1 `0x51` global-data dump (513 frames total).
+- Full bank receive is sequential: the app sends `0x1C` slot requests and waits for `0x4C`; the transport/request PoC still requires hardware validation with the native receive path.
+- Current-program (`0x10`) and stored-program (`0x1C`) requests use the documented bare request form without an extra trailing `0x00` parameter. The old trailing-`00` variant is retained only for explicit protocol experiments.
 
 ## Main workflows
 
