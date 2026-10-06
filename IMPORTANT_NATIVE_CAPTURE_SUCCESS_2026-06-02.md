@@ -30,11 +30,11 @@ Observed facts:
 - `0` fragment events.
 - `0` suspicious events.
 
-Semantic validation of the dumps:
+Semantic validation of the dumps (classification corrected 2026-10-06):
 
 - `500 x 0x4C` program dumps
-- `6 x 0x44` bank index blocks
-- `6 x 0x45` sequencer index blocks
+- `6 x 0x44` User Scale Data Dump blocks
+- `6 x 0x45` User Octave Data Dump blocks
 - `1 x 0x51` global block
 - slots `0..499` present and unique
 
