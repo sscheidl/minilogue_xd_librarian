@@ -105,8 +105,10 @@ Damit bleibt der Monitor selbst generisch, waehrend Synth-spezifische Details au
 - SysEx send: geoeffneter MIDI-OUT-Port ueber `mido`/WinMM
 - kein automatisches MIDI-Senden beim Start
 - `0x0E` wird als globaler/diagnostischer Request behandelt und erwartet `0x51`
-- Full-bank receive bleibt sequentiell ueber `0x1C`-Slot-Requests mit `0x4C`-Antworten
-- Current- und Slot-Requests nutzen die validierte Trailing-`00`-Variante
+- `0x44` ist User Scale Data Dump und `0x45` ist User Octave Data Dump; die fruehere Bezeichnung als Bank-/Sequencer-Index war falsch
+- Ein manuell am XD ausgeloester `ALL DUMP` umfasst 500 `0x4C`-Programmdumps, 6 `0x44`-User-Scale-Dumps, 6 `0x45`-User-Octave-Dumps und 1 `0x51`-Global-Dump = 513 Frames
+- Full-bank receive bleibt sequentiell ueber `0x1C`-Slot-Requests mit `0x4C`-Antworten; der aktive Request/Response-PoC muss mit dem nativen RX-Pfad noch an echter Hardware bestaetigt werden
+- Current- und Slot-Requests verwenden standardmaessig die dokumentierte Form ohne zusaetzliches `0x00` vor `F7`; die alte Trailing-`00`-Variante bleibt nur fuer explizite Protokolltests erhalten
 - User-Unit-Inventory und User-Unit-Writes nutzen die offizielle `logue-cli`-Toolchain statt experimenteller Roh-SysEx-Kommandos
 
 ## GUI-Stand
