@@ -41,9 +41,9 @@ def classify_xd_sysex(raw: bytes) -> XDSysexClassification:
     if command == 0x23:
         return XDSysexClassification(command, "write-ack", False)
     if command == 0x44:
-        return XDSysexClassification(command, "program-index-data-dump", False)
+        return XDSysexClassification(command, "user-scale-data-dump", False)
     if command == 0x45:
-        return XDSysexClassification(command, "sequencer-index-data-dump", False)
+        return XDSysexClassification(command, "user-octave-data-dump", False)
     if command == 0x51:
         return XDSysexClassification(command, "global-data-dump", False)
     return XDSysexClassification(command, "unknown", False)
@@ -60,9 +60,9 @@ def summarize_xd_sysex_stream(raw: bytes) -> dict[str, int]:
         elif info.command == 0x4C:
             counts["0x4C program dumps"] += 1
         elif info.command == 0x44:
-            counts["0x44 bank index"] += 1
+            counts["0x44 user scale"] += 1
         elif info.command == 0x45:
-            counts["0x45 sequencer index"] += 1
+            counts["0x45 user octave"] += 1
         elif info.command == 0x51:
             counts["0x51 global data"] += 1
         elif info.command == 0x23:
@@ -72,8 +72,8 @@ def summarize_xd_sysex_stream(raw: bytes) -> dict[str, int]:
     return {
         "0x40 current program": counts["0x40 current program"],
         "0x4C program dumps": counts["0x4C program dumps"],
-        "0x44 bank index": counts["0x44 bank index"],
-        "0x45 sequencer index": counts["0x45 sequencer index"],
+        "0x44 user scale": counts["0x44 user scale"],
+        "0x45 user octave": counts["0x45 user octave"],
         "0x51 global data": counts["0x51 global data"],
         "0x23 write ack": counts["0x23 write ack"],
         "unknown": counts["unknown"],
