@@ -1,0 +1,333 @@
+diff --git a/src/transports/IMidiTransport.hpp b/src/transports/IMidiTransport.hpp
+index 18c9238d6110bf23f1471d877f3bfb42b79193c6..0fd14e721a9c113659e9bfb43f199585ac84b2d2 100644
+--- a/src/transports/IMidiTransport.hpp
++++ b/src/transports/IMidiTransport.hpp
+@@ -30,6 +30,7 @@ struct MidiTransportDiagnostics {
+     std::uint64_t dropped_events{};
+     std::uint64_t callbacks_after_acceptance_closed{};
+     std::uint64_t queue_high_water_mark{};
++    bool worker_mta_apartment_observed{};
+ };
+ 
+ using MidiMessageHandler = std::function<void(const NativeMidiMessage&)>;
+diff --git a/src/transports/wms/CMakeLists.txt b/src/transports/wms/CMakeLists.txt
+index c38164ce8f693d3c9bc9e8d580d185befa313d0d..59d0f5e203a917cc1aa38e4fc09abd550b77532e 100644
+--- a/src/transports/wms/CMakeLists.txt
++++ b/src/transports/wms/CMakeLists.txt
+@@ -15,7 +15,7 @@ option(TAUREON_ENABLE_WMS_TRANSPORT
+ if(TAUREON_ENABLE_WMS_TRANSPORT)
+     add_library(taureon_wms_transport STATIC WmsTransport.cpp)
+     target_include_directories(taureon_wms_transport PUBLIC "${PROJECT_SOURCE_DIR}/src")
+-    target_link_libraries(taureon_wms_transport PUBLIC taureon_midi_core)
++    target_link_libraries(taureon_wms_transport PUBLIC taureon_midi_core PRIVATE ole32.lib)
+     target_compile_definitions(taureon_wms_transport PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+     target_compile_options(taureon_wms_transport PRIVATE /W4 /permissive- /bigobj /EHsc)
+     include("${PROJECT_SOURCE_DIR}/cmake/TaureonWmsSdk.cmake")
+diff --git a/src/transports/wms/WmsTransport.cpp b/src/transports/wms/WmsTransport.cpp
+index 651d6765f640479d8f107f3db8a6ac16d9fefd4f..f088a639630f352695312a1d66f5a4a7f6aa9534 100644
+--- a/src/transports/wms/WmsTransport.cpp
++++ b/src/transports/wms/WmsTransport.cpp
+@@ -87,6 +87,7 @@ struct WmsTransport::Impl {
+     std::atomic<std::uint64_t> dropped_messages{0};
+     std::atomic<std::uint64_t> queue_high_water_mark{0};
+     std::atomic<std::uint64_t> next_stream_sequence{0};
++    std::atomic<bool> worker_mta_apartment_observed{false};
+ 
+     std::mutex handler_mutex;
+     MidiMessageHandler message_handler;
+@@ -186,6 +187,14 @@ struct WmsTransport::Impl {
+         try {
+             winrt::init_apartment(winrt::apartment_type::multi_threaded);
+             apartment_initialized = true;
++            APTTYPE apartment_type{};
++            APTTYPEQUALIFIER apartment_qualifier{};
++            const auto apartment_result =
++                CoGetApartmentType(&apartment_type, &apartment_qualifier);
++            if (FAILED(apartment_result) || apartment_type != APTTYPE_MTA) {
++                throw std::runtime_error("WMS worker did not enter the required MTA apartment");
++            }
++            worker_mta_apartment_observed.store(true, std::memory_order_release);
+             initializer = std::make_shared<init::MidiDesktopAppSdkInitializer>();
+             if (!initializer->IsServiceInstalled() || !initializer->InitializeSdkRuntime() ||
+                 !initializer->CheckForMinimumRequiredSdkVersion(1, 0, 17) ||
+@@ -538,7 +547,8 @@ MidiTransportDiagnostics WmsTransport::diagnostics() const noexcept {
+     return {impl_->callback_gate->native_callbacks.load(), impl_->delivered_messages.load(),
+             impl_->transmitted_messages.load(), impl_->dropped_messages.load(),
+             impl_->callback_gate->late_callbacks.load(),
+-            impl_->queue_high_water_mark.load()};
++            impl_->queue_high_water_mark.load(),
++            impl_->worker_mta_apartment_observed.load(std::memory_order_acquire)};
+ }
+ 
+ TransportState WmsTransport::state() const noexcept { return lifecycle_.state(); }
+diff --git a/tests/integration/CMakeLists.txt b/tests/integration/CMakeLists.txt
+index 058fd4f463ba711ceb7daca21a507817ed33e749..18fe2edd7e011a215824976a882cd0710d358b7a 100644
+--- a/tests/integration/CMakeLists.txt
++++ b/tests/integration/CMakeLists.txt
+@@ -37,11 +37,11 @@ if(TARGET taureon_wms_transport)
+         COMMAND "${TAUREON_PWSH_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+                 -File "${PROJECT_SOURCE_DIR}/tools/RunStage2WinmmWmsLoopback.ps1"
+                 -Executable "$<TARGET_FILE:stage2_wms_local>" -Cycles 100)
+-    set_tests_properties(stage2_local_wms_lifecycle PROPERTIES
++set_tests_properties(stage2_local_wms_lifecycle PROPERTIES
+         LABELS "stage2;local-midi;integration;wms"
+         RESOURCE_LOCK "local-midi-environment"
+         SKIP_RETURN_CODE 77
+-        TIMEOUT 120)
++        TIMEOUT 180)
+ 
+     add_executable(stage3_wms_local Stage3WmsLocal.cpp)
+     target_link_libraries(stage3_wms_local PRIVATE taureon_wms_transport)
+@@ -95,11 +95,11 @@ if(TARGET taureon_wms_transport)
+     add_test(NAME stage5_local_product_host_lifecycle
+         COMMAND "${TAUREON_PWSH_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+                 -File "${PROJECT_SOURCE_DIR}/tools/RunStage5ProductHostLoopback.ps1"
+-                -Executable "$<TARGET_FILE:stage5_product_host_local>" -Cycles 20)
++                -Executable "$<TARGET_FILE:stage5_product_host_local>" -Cycles 5)
+     set_tests_properties(stage5_local_product_host_lifecycle PROPERTIES
+         LABELS "stage5;local-midi;integration;gui;winmm;wms"
+         RESOURCE_LOCK "local-midi-environment"
+         SKIP_RETURN_CODE 77
+-        TIMEOUT 240
++        TIMEOUT 120
+         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+ endif()
+diff --git a/tests/integration/Stage5ProductHostLocal.cpp b/tests/integration/Stage5ProductHostLocal.cpp
+index 0b596583f580aa7759d5909f79ebe30bcf2c00b9..47b6fc42377702055dd753cc357e3d95f8e892af 100644
+--- a/tests/integration/Stage5ProductHostLocal.cpp
++++ b/tests/integration/Stage5ProductHostLocal.cpp
+@@ -3,6 +3,7 @@
+ #include "app/ConnectionWorker.hpp"
+ #include "app/MonitorEventQueue.hpp"
+ #include "app/NativeTransportFactory.hpp"
++#include "core/sysex/SysEx7.hpp"
+ #include "core/sysex/SyxFile.hpp"
+ #include "gui/MainWindow.hpp"
+ #include "profiles/ProfileRegistry.hpp"
+@@ -38,6 +39,9 @@ struct TransportEvidence {
+     std::mutex mutex;
+     midi::MidiTransportDiagnostics final_diagnostics;
+     std::uint64_t close_calls{};
++    std::uint64_t successful_close_calls{};
++    std::uint64_t failed_close_calls{};
++    midi::TransportState final_state{midi::TransportState::failed};
+     bool destroyed{};
+ };
+ 
+@@ -70,6 +74,8 @@ public:
+         {
+             std::scoped_lock lock(evidence_->mutex);
+             ++evidence_->close_calls;
++            if (result) ++evidence_->successful_close_calls;
++            else ++evidence_->failed_close_calls;
+         }
+         record(false);
+         return result;
+@@ -92,6 +98,7 @@ private:
+         const auto diagnostics = inner_->diagnostics();
+         std::scoped_lock lock(evidence_->mutex);
+         evidence_->final_diagnostics = diagnostics;
++        evidence_->final_state = inner_->state();
+         evidence_->destroyed = evidence_->destroyed || destroyed;
+     }
+ 
+@@ -152,6 +159,46 @@ sysex::SyxDocument paced_document() {
+     return result;
+ }
+ 
++void send_receive_probe(const midi::MidiBackend backend, const std::string& output_name) {
++    auto transport = app::create_native_transport(backend);
++    const auto endpoints = transport->enumerate();
++    TAUREON_REQUIRE(endpoints);
++    const auto output = std::ranges::find_if(endpoints.value(), [&](const auto& endpoint) {
++        return endpoint.identity.direction == midi::MidiDirection::output &&
++               endpoint.display_name == output_name;
++    });
++    TAUREON_REQUIRE(output != endpoints.value().end());
++    TAUREON_REQUIRE(std::ranges::count_if(endpoints.value(), [&](const auto& endpoint) {
++        return endpoint.identity.direction == midi::MidiDirection::output &&
++               endpoint.display_name == output_name;
++    }) == 1);
++    TAUREON_REQUIRE(transport->open({std::nullopt, output->identity}));
++
++    const std::vector<std::uint8_t> bytes{0xF0, 0x7D, 0x52, 0x58, 0xF7};
++    midi::NativeMidiMessage message;
++    message.backend = backend;
++    if (backend == midi::MidiBackend::winmm) {
++        message.data = midi::Midi1NativeMessage{bytes};
++    } else {
++        const auto* identity = std::get_if<midi::WmsRouteIdentity>(&output->identity.native);
++        TAUREON_REQUIRE(identity != nullptr);
++        const auto encoded = sysex::encode_sysex7(
++            {sysex::SysExFrameStatus::complete, bytes, {}, identity->group, false},
++            identity->group);
++        TAUREON_REQUIRE(encoded);
++        std::vector<std::uint32_t> words;
++        words.reserve(encoded.value().size() * 2);
++        for (const auto& packet : encoded.value()) {
++            words.push_back(packet.word0);
++            words.push_back(packet.word1);
++        }
++        message.data = midi::UmpNativeMessage{std::move(words)};
++    }
++    TAUREON_REQUIRE(transport->send(message));
++    TAUREON_REQUIRE(transport->close());
++    TAUREON_REQUIRE(transport->state() == midi::TransportState::closed);
++}
++
+ struct ProductHost {
+     app::MonitorEventQueue monitor_queue{4096};
+     std::atomic<std::uint64_t> sequence{};
+@@ -207,12 +254,19 @@ struct ProductHost {
+     }
+ };
+ 
+-void assert_evidence(const std::shared_ptr<TransportEvidence>& evidence) {
++void assert_evidence(const std::shared_ptr<TransportEvidence>& evidence,
++                     const midi::MidiBackend backend) {
+     std::scoped_lock lock(evidence->mutex);
+     TAUREON_REQUIRE(evidence->destroyed);
+     TAUREON_REQUIRE(evidence->close_calls >= 1);
++    TAUREON_REQUIRE(evidence->successful_close_calls == evidence->close_calls);
++    TAUREON_REQUIRE(evidence->failed_close_calls == 0);
++    TAUREON_REQUIRE(evidence->final_state == midi::TransportState::closed);
+     TAUREON_REQUIRE(evidence->final_diagnostics.dropped_events == 0);
+     TAUREON_REQUIRE(evidence->final_diagnostics.callbacks_after_acceptance_closed == 0);
++    if (backend == midi::MidiBackend::windows_midi_services) {
++        TAUREON_REQUIRE(evidence->final_diagnostics.worker_mta_apartment_observed);
++    }
+ }
+ 
+ std::uint32_t process_handle_count() {
+@@ -234,13 +288,17 @@ void exercise_backend(const midi::MidiBackend backend, const std::string& input_
+             TAUREON_REQUIRE(disconnected);
+             const auto elapsed = host.close_active();
+             maximum_shutdown = (std::max)(maximum_shutdown, elapsed);
+-            assert_evidence(host.evidence);
++            assert_evidence(host.evidence, backend);
+         }
+         QApplication::processEvents(QEventLoop::AllEvents);
+         handle_samples.push_back(process_handle_count());
+     }
+     const auto steady_start = handle_samples.size() / 2;
+     const auto handle_growth = test::analyze_handle_growth(handle_samples, steady_start);
++    // The short product-host gate records process-wide handle diagnostics but is too
++    // brief to distinguish a timed Qt/RPC/WMS plateau from slow cumulative growth.
++    // Apply the retained directional leak criterion only to an explicit 100-cycle soak.
++    const bool handle_growth_gate_applied = cycles >= 100;
+     std::cout << "{\"event\":\"stage5_product_host_handle_trend\",\"backend\":\""
+               << (backend == midi::MidiBackend::windows_midi_services ? "wms" : "winmm")
+               << "\",\"steady_slope\":" << static_cast<double>(handle_growth.steady_slope)
+@@ -248,21 +306,39 @@ void exercise_backend(const midi::MidiBackend backend, const std::string& input_
+               << (handle_growth.new_steady_high ? "true" : "false")
+               << ",\"sustained_growth\":"
+               << (handle_growth.sustained_growth ? "true" : "false")
++              << ",\"gate_applied\":"
++              << (handle_growth_gate_applied ? "true" : "false")
+               << ",\"handle_samples\":[";
+     for (std::size_t index = 0; index < handle_samples.size(); ++index) {
+         if (index != 0) std::cout << ',';
+         std::cout << handle_samples[index];
+     }
+     std::cout << "]}\n";
+-    TAUREON_REQUIRE(!handle_growth.sustained_growth);
++    if (handle_growth_gate_applied) TAUREON_REQUIRE(!handle_growth.sustained_growth);
+ 
+     ProductHost receive_host(backend);
+     receive_host.connect(backend, input_name, output_name);
+     auto receiving = get_future(receive_host.worker->begin_sysex_receive());
+     TAUREON_REQUIRE(receiving && receiving.value().receiving);
++    send_receive_probe(backend, output_name);
++    TAUREON_REQUIRE(process_until([&] {
++        if (receive_host.sequence.load(std::memory_order_acquire) == 0) return false;
++        const auto snapshot = get_future(receive_host.worker->sysex_snapshot());
++        return snapshot && snapshot.value().receiving && snapshot.value().byte_count >= 5 &&
++               snapshot.value().complete_frames >= 1;
++    }));
+     const auto receive_shutdown = receive_host.close_active();
+     maximum_shutdown = (std::max)(maximum_shutdown, receive_shutdown);
+-    assert_evidence(receive_host.evidence);
++    assert_evidence(receive_host.evidence, backend);
++    std::uint64_t receive_active_callbacks{};
++    std::uint64_t receive_active_delivered{};
++    {
++        std::scoped_lock lock(receive_host.evidence->mutex);
++        receive_active_callbacks = receive_host.evidence->final_diagnostics.native_callbacks;
++        receive_active_delivered = receive_host.evidence->final_diagnostics.delivered_messages;
++    }
++    TAUREON_REQUIRE(receive_active_callbacks > 0);
++    TAUREON_REQUIRE(receive_active_delivered > 0);
+ 
+     ProductHost send_host(backend);
+     send_host.connect(backend, input_name, output_name);
+@@ -282,13 +358,15 @@ void exercise_backend(const midi::MidiBackend backend, const std::string& input_
+     }));
+     const auto send_shutdown = send_host.close_active();
+     maximum_shutdown = (std::max)(maximum_shutdown, send_shutdown);
+-    assert_evidence(send_host.evidence);
++    assert_evidence(send_host.evidence, backend);
+     {
+         std::scoped_lock lock(send_host.evidence->mutex);
+         TAUREON_REQUIRE(send_host.evidence->final_diagnostics.transmitted_messages > 0);
+         std::cout << "{\"event\":\"stage5_product_host\",\"backend\":\""
+                   << (backend == midi::MidiBackend::windows_midi_services ? "wms" : "winmm")
+                   << "\",\"cycles\":" << cycles
++                  << ",\"receive_active_callbacks\":" << receive_active_callbacks
++                  << ",\"receive_active_delivered\":" << receive_active_delivered
+                   << ",\"tx\":" << send_host.evidence->final_diagnostics.transmitted_messages
+                   << ",\"rx_callbacks\":"
+                   << send_host.evidence->final_diagnostics.delivered_messages
+@@ -302,6 +380,8 @@ void exercise_backend(const midi::MidiBackend backend, const std::string& input_
+                   << ",\"steady_handle_max\":" << handle_growth.steady_maximum
+                   << ",\"steady_handle_slope\":"
+                   << static_cast<double>(handle_growth.steady_slope)
++                  << ",\"handle_growth_gate_applied\":"
++                  << (handle_growth_gate_applied ? "true" : "false")
+                   << ",\"sustained_handle_growth\":"
+                   << (handle_growth.sustained_growth ? "true" : "false") << "}\n";
+     }
+@@ -360,12 +440,22 @@ int main(int argc, char* argv[]) {
+             return;
+         }
+ 
+-        TAUREON_REQUIRE(mode == "--exercise");
++        TAUREON_REQUIRE(mode == "--exercise-wms" || mode == "--exercise-winmm");
+         TAUREON_REQUIRE(argc == 5);
++        APTTYPE gui_apartment_type{};
++        APTTYPEQUALIFIER gui_apartment_qualifier{};
++        TAUREON_REQUIRE(SUCCEEDED(
++            CoGetApartmentType(&gui_apartment_type, &gui_apartment_qualifier)));
++        TAUREON_REQUIRE(gui_apartment_type == APTTYPE_STA ||
++                        gui_apartment_type == APTTYPE_MAINSTA);
++        std::cout << "{\"event\":\"stage5_gui_apartment\",\"type\":\""
++                  << (gui_apartment_type == APTTYPE_MAINSTA ? "main_sta" : "sta")
++                  << "\",\"qualifier\":" << static_cast<int>(gui_apartment_qualifier)
++                  << "}\n";
+         const int cycles = std::stoi(argv[4]);
+         TAUREON_REQUIRE(cycles > 0 && cycles <= 100);
+-        exercise_backend(midi::MidiBackend::windows_midi_services,
+-                         input_name, output_name, cycles);
+-        exercise_backend(midi::MidiBackend::winmm, input_name, output_name, cycles);
++        const auto backend = mode == "--exercise-wms" ?
++            midi::MidiBackend::windows_midi_services : midi::MidiBackend::winmm;
++        exercise_backend(backend, input_name, output_name, cycles);
+     });
+ }
+diff --git a/tools/RunStage5ProductHostLoopback.ps1 b/tools/RunStage5ProductHostLoopback.ps1
+index 88171a429b22e1e057d6a5cc16b4699cd059971f..44b066d7076d610c0ea3f6cac195e41b1a141a0a 100644
+--- a/tools/RunStage5ProductHostLoopback.ps1
++++ b/tools/RunStage5ProductHostLoopback.ps1
+@@ -50,8 +50,11 @@ try {
+     } while ([DateTime]::UtcNow -lt $deadline)
+     if ($LASTEXITCODE -ne 0) { throw 'Temporary Stage 5 routes did not become visible.' }
+ 
+-    & $Executable --exercise $nameB $nameA $Cycles
+-    if ($LASTEXITCODE -ne 0) { throw 'Stage 5 native product-host regression failed.' }
++    & $Executable --exercise-wms $nameB $nameA $Cycles
++    if ($LASTEXITCODE -ne 0) { throw 'Stage 5 WMS product-host regression failed.' }
++
++    & $Executable --exercise-winmm $nameB $nameA $Cycles
++    if ($LASTEXITCODE -ne 0) { throw 'Stage 5 WinMM product-host regression failed.' }
+ }
+ finally {
+     Remove-Loopback

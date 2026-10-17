@@ -17,10 +17,10 @@ class XDSysexClassificationTest(unittest.TestCase):
         self.assertEqual(result.label, "current-program-data-dump")
         self.assertTrue(result.sendable_program)
 
-    def test_unknown_commands_are_preserved_as_unknown(self):
+    def test_non_program_commands_are_not_sendable(self):
         cases = {
-            0x44: "program-index-data-dump",
-            0x45: "sequencer-index-data-dump",
+            0x44: "user-scale-data-dump",
+            0x45: "user-octave-data-dump",
             0x51: "global-data-dump",
         }
         for command, label in cases.items():
@@ -28,6 +28,12 @@ class XDSysexClassificationTest(unittest.TestCase):
                 result = classify_xd_sysex(bytes([0xF0, 0x42, 0x30, 0x00, 0x01, 0x51, command, 0xF7]))
                 self.assertEqual(result.label, label)
                 self.assertFalse(result.sendable_program)
+
+    def test_unknown_commands_are_preserved_as_unknown(self):
+        result = classify_xd_sysex(bytes.fromhex("F0 42 30 00 01 51 7E F7"))
+
+        self.assertEqual(result.label, "unknown")
+        self.assertFalse(result.sendable_program)
 
     def test_rejects_other_korg_family_id(self):
         result = classify_xd_sysex(bytes.fromhex("F0 42 30 00 01 2C 4C 00 00 F7"))

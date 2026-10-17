@@ -1,0 +1,69 @@
+{
+  "head": "7dc09c9bd241cb773b25b41402d1aea892926d3f",
+  "branch": "codex/stage5-block-b-windows-evidence",
+  "status": [
+    " M src/transports/IMidiTransport.hpp",
+    " M src/transports/wms/CMakeLists.txt",
+    " M src/transports/wms/WmsTransport.cpp",
+    " M tests/integration/CMakeLists.txt",
+    " M tests/integration/Stage5ProductHostLocal.cpp",
+    " M tools/RunStage5ProductHostLoopback.ps1",
+    "?? .work/"
+  ],
+  "remoteRefs": [
+    "69dadd3a51c30deba5216e20016d9bffd88c11de\trefs/heads/claude/reference-archive-v1",
+    "2c6b2cfd65782c3e87931a0740e91bb4d3bc131a\trefs/heads/claude/stage5-gate-cleanup",
+    "7dc09c9bd241cb773b25b41402d1aea892926d3f\trefs/heads/codex/stage5-block-b-windows-evidence",
+    "cdc38f6489d6067df6145a45e44c6e7950cc5cf1\trefs/heads/codex/stage5-hardware-test-bundle",
+    "d04e99c08d9d7f4134b7040a3e8abba9654045eb\trefs/heads/main"
+  ],
+  "trackedChanges": [
+    {
+      "path": "src/transports/IMidiTransport.hpp",
+      "bytes": 2053,
+      "sha256": "E0C398B756971B364F80D242D89F80466EEF687AC602523A04427323599914D3"
+    },
+    {
+      "path": "src/transports/wms/CMakeLists.txt",
+      "bytes": 1409,
+      "sha256": "AFC9FCE711810C199F94EC0ABD1C46B6C57B887F74D1F47B97CA2F268C88E7B0"
+    },
+    {
+      "path": "src/transports/wms/WmsTransport.cpp",
+      "bytes": 27570,
+      "sha256": "6E5D91134A393CA74FB426FC706E3DE613C37E8711B2D8D3A0F2A378104C5764"
+    },
+    {
+      "path": "tests/integration/CMakeLists.txt",
+      "bytes": 5762,
+      "sha256": "4446E4E402074988EB442685A93BFCE8B818853914B3F10F95CD9DBE028C8DBC"
+    },
+    {
+      "path": "tests/integration/Stage5ProductHostLocal.cpp",
+      "bytes": 20637,
+      "sha256": "3B7B27F577A1659676C39AD20488E9EABB97FAA9CE2F3B911EA07E39B4E28362"
+    },
+    {
+      "path": "tools/RunStage5ProductHostLoopback.ps1",
+      "bytes": 2536,
+      "sha256": "5FAE480BAAE1417C830A99B17424836DF76BDE5E33580B74CDAF1BD70F37F7A3"
+    }
+  ],
+  "untrackedCount": 3514,
+  "untrackedSample": [
+    ".work/stage5-p1-build/.qt/QtDeploySupport-Debug.cmake",
+    ".work/stage5-p1-build/.qt/QtDeploySupport-MinSizeRel.cmake",
+    ".work/stage5-p1-build/.qt/QtDeploySupport-RelWithDebInfo.cmake",
+    ".work/stage5-p1-build/.qt/QtDeploySupport-Release.cmake",
+    ".work/stage5-p1-build/.qt/QtDeployTargets-Debug.cmake",
+    ".work/stage5-p1-build/.qt/QtDeployTargets-MinSizeRel.cmake",
+    ".work/stage5-p1-build/.qt/QtDeployTargets-RelWithDebInfo.cmake",
+    ".work/stage5-p1-build/.qt/QtDeployTargets-Release.cmake",
+    ".work/stage5-p1-build/ALL_BUILD.vcxproj",
+    ".work/stage5-p1-build/ALL_BUILD.vcxproj.filters",
+    ".work/stage5-p1-build/CMakeCache.txt",
+    ".work/stage5-p1-build/CMakeFiles/09ec9f7b509ab5bc2d20b987c5686589/Continuous.rule"
+  ],
+  "scope": "Read-only source inspection. Patch preserves tracked content changes relative to HEAD; not a full worktree backup. Untracked .work tree remains at source, not archived. No code/build/hardware test performed.",
+  "snapshotPatch": "TAUREON_LOCAL_CHANGES.patch"
+}
